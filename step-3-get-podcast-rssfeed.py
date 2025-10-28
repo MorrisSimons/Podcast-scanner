@@ -3,12 +3,9 @@ import json
 import os
 from pathlib import Path
 
-output_dir = "output"
-rss_dir = Path(output_dir) / "rss"
-rss_dir.mkdir(parents=True, exist_ok=True)
 
 # Process each JSON file in the output folder
-for json_file in Path(output_dir).glob("*.json"):
+for json_file in Path("output").glob("*.json"):
     with open(json_file, "r") as f:
         data = json.load(f)
     
@@ -27,8 +24,8 @@ for json_file in Path(output_dir).glob("*.json"):
     response = requests.request("GET", rss_url, headers=headers, data=payload)
     
     # Save the RSS feed response
-    output_file = rss_dir / f"{json_file.stem}_rss.xml"
-    with open(output_file, "w") as f:
+    output_file = rf"{json_file.stem}_rss.xml"
+    with open(f"output_rss/{output_file}", "w") as f:
         f.write(response.text)
     
     print(f"Saved to {output_file}")
