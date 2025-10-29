@@ -9,6 +9,37 @@ import requests
 MP3_URL = "https://sphinx.acast.com/p/acast/s/rmm/e/68fc911b8a5d09ce06c3d486/media.mp3"
 
 
+import boto3
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env if present
+load_dotenv()
+
+# Create a session using Scaleway's S3-compatible endpoint
+session = boto3.session.Session()
+
+region_name = os.getenv("S3_REGION")
+endpoint_url = os.getenv("S3_ENDPOINT_URL")
+aws_access_key_id = os.getenv("S3_ACCESS_KEY_ID")
+aws_secret_access_key = os.getenv("S3_SECRET_ACCESS_KEY")
+
+if not all([region_name, endpoint_url, aws_access_key_id, aws_secret_access_key]):
+    raise ValueError(
+        "Missing required environment variables: S3_REGION, S3_ENDPOINT_URL, "
+        "S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY"
+    )
+
+s3_client = session.client(
+    service_name='s3',
+    region_name=region_name,
+    endpoint_url=endpoint_url,
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key
+)
+
+
+
 def download_mp3(url: str, destination: Path) -> None:
     response = requests.get(url, stream=True, timeout=60)
     response.raise_for_status()

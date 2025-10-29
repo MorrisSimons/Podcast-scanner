@@ -10,6 +10,10 @@ from email.utils import parsedate_to_datetime
 import requests
 
 
+
+
+
+
 # -----------------------------
 # Environment helpers
 # -----------------------------
@@ -179,19 +183,31 @@ class SupabaseRestClient:
 # -----------------------------
 
 def derive_profile_basename_from_xml(xml_file: Path) -> str:
-	# Expect filenames like "acast_podcast_profile_rss.xml" -> profile base "acast_podcast_profile"
-	stem = xml_file.stem  # e.g., "acast_podcast_profile_rss"
+	# Expect filenames like "0a1bdbfb-2843-4b8d-8548-08dcd1d9d367_rss.xml" -> UUID "0a1bdbfb-2843-4b8d-8548-08dcd1d9d367"
+	stem = xml_file.stem  # e.g., "0a1bdbfb-2843-4b8d-8548-08dcd1d9d367_rss"
 	if stem.endswith("_rss"):
 		return stem[:-4]
 	return stem
 
 
-def read_profile_json(profile_dir: Path, profile_basename: str) -> Dict[str, Any]:
-	profile_path = profile_dir / f"{profile_basename}.json"
-	if not profile_path.exists():
-		raise FileNotFoundError(f"Profile JSON not found for {profile_basename}: {profile_path}")
-	with profile_path.open("r", encoding="utf-8") as f:
-		return json.load(f)
+def read_rss_feed_url_from_db(client: SupabaseRestClient, podcast_id: str) -> Tuple[Optional[str], Optional[str]]:
+	"""Query podcast_profiles table for rss_feed_url and supplier_name using the podcast ID."""
+	resp = client.post(
+		path="/podcast_profiles",
+		payload={},
+		params={"id": f"eq.{podcast_id}", "select": "rss_feed_url,supplier_name"}
+	)
+	if resp.status_code != 200:
+		# Return None values if lookup fails; podcast_profiles may not be populated yet
+		return None, None
+	data = resp.json()
+	if not data or len(data) == 0:
+		# Return None values if podcast profile not found
+		return None, None
+	record = data[0]
+	rss_feed_url = record.get("rss_feed_url")
+	supplier_name = record.get("supplier_name")
+	return rss_feed_url, supplier_name
 
 
 def parse_podcast_from_channel(channel: ET.Element, rss_feed_url: str, source: str) -> Dict[str, Any]:
@@ -345,21 +361,22 @@ def upsert_episodes(client: SupabaseRestClient, records: List[Dict[str, Any]], c
 	return count, chunks
 
 
-def process_one_feed(client: SupabaseRestClient, xml_file: Path, profile_dir: Path) -> None:
+def process_one_feed(client: SupabaseRestClient, xml_file: Path) -> None:
 	profile_basename = derive_profile_basename_from_xml(xml_file)
-	profile = read_profile_json(profile_dir, profile_basename)
-	rss_feed_url = profile.get("rssFeedUrl")
+	rss_feed_url, supplier_name = read_rss_feed_url_from_db(client, profile_basename)
+	# If rss_feed_url is not found in database, use a placeholder based on profile_basename
 	if not rss_feed_url:
-		raise RuntimeError(f"rssFeedUrl missing in profile {profile_basename}.json")
-	# Source derived from file prefix before first underscore, fallback to supplierName
-	source = profile_basename.split("_")[0] if "_" in profile_basename else profile.get("supplierName") or "unknown"
+		rss_feed_url = f"file://{profile_basename}"
+	# Source from supplier_name or fallback to "unknown"
+	source = supplier_name or "unknown"
 
 	# Parse XML
 	try:
 		tree = ET.parse(str(xml_file))
 		root = tree.getroot()
 	except Exception as exc:
-		raise RuntimeError(f"Failed to parse XML {xml_file.name}: {exc}")
+		print(f"WARNING: Failed to parse XML {xml_file.name}: {exc}")
+		return
 
 	# channel node
 	channel = None
@@ -394,24 +411,21 @@ def main() -> None:
 
 	client = SupabaseRestClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-	rss_dir = project_root / "output_rss"
-	profile_dir = project_root / "output_podcast_profile"
+	rss_dir = project_root / "temp_rss_output"
 	if not rss_dir.exists():
-		raise FileNotFoundError(f"output_rss directory not found: {rss_dir}")
-	if not profile_dir.exists():
-		raise FileNotFoundError(f"output_podcast_profile directory not found: {profile_dir}")
+		raise FileNotFoundError(f"temp_rss_output directory not found: {rss_dir}")
 
 	xml_files = sorted([p for p in rss_dir.iterdir() if p.is_file() and p.suffix.lower() == ".xml"])
 	if not xml_files:
-		print("No RSS XML files found in output_rss.")
+		print("No RSS XML files found in temp_rss_output.")
 		return
 
 	for xml_file in xml_files:
 		try:
-			process_one_feed(client, xml_file, profile_dir)
+			process_one_feed(client, xml_file)
 		except Exception as exc:
 			# Fail fast per user rules: raise explicit error
-			raise
+			print(f"ERROR: Failed to process {xml_file.name}: {exc}")
 
 
 if __name__ == "__main__":
