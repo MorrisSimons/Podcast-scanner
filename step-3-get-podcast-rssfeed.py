@@ -69,23 +69,35 @@ for row in tqdm(rows, desc="RSS downloads", unit="feed"):
     #print(f"Fetching RSS feed for: {podcast_name}")
 
     time.sleep(4)
-    response = requests.get(rss_url, timeout=60)
-    # Update status_code back to Supabase for this row
-    status = response.status_code
+    try:
+        response = requests.get(rss_url, timeout=60)
+        status = response.status_code
+    except requests.exceptions.TooManyRedirects:
+        status = 0
+        print(f"Too many redirects for id={row.get('id')}: {rss_url}")
+        response = None
+    except requests.exceptions.RequestException as e:
+        status = 0
+        print(f"Request failed for id={row.get('id')}: {e}")
+        response = None
+
+    # Update RSS_request_status_code back to Supabase for this row
     upd = requests.patch(
         REST_URL,
         headers={**HEADERS, "Content-Type": "application/json"},
         params={"id": f"eq.{row.get('id')}"},
-        data=json.dumps({"status_code": status}),
+        data=json.dumps({"RSS_request_status_code": status}),
         timeout=30,
     )
     if upd.status_code not in (200, 204):
-        print(f"Failed to update status_code for id={row.get('id')}: HTTP {upd.status_code} - {upd.text}")
+        print(f"Failed to update RSS_request_status_code for id={row.get('id')}: HTTP {upd.status_code} - {upd.text}")
     if status != 200:
         print(f"Failed to fetch RSS for id={row.get('id')}: HTTP {status}")
         continue
 
     # Save the RSS feed response (use id to ensure uniqueness)
+    if response is None:
+        continue
     output_file = f"{row.get('id')}_rss.xml"
     with open(output_dir / output_file, "w", encoding="utf-8") as f:
         f.write(response.text)
