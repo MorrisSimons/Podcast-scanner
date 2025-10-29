@@ -35,7 +35,7 @@ while True:
     resp = requests.get(
         REST_URL,
         headers=HEADERS,
-        params={"select": "id,podcast_name,rss_feed_url", "limit": page_size, "offset": start},
+        params={"select": "id,podcast_name,rss_feed_url,RSS_request_status_code", "limit": page_size, "offset": start},
         timeout=60,
     )
     if resp.status_code not in (200, 206):
@@ -54,6 +54,11 @@ print(f"Fetched {len(rows)} rows from Supabase.")
 # Start: process each row
 print("Starting RSS downloads for fetched rows...")
 for row in tqdm(rows, desc="RSS downloads", unit="feed"):
+    # Skip if RSS already fetched successfully
+    if row.get("RSS_request_status_code") == 200:
+        print(f"Skipping id={row.get('id')} because RSS already fetched successfully")
+        continue
+    
     rss_url = row.get("rss_feed_url")
     if not rss_url:
         print(f"No rss_feed_url found for id={row.get('id')}")
@@ -61,12 +66,24 @@ for row in tqdm(rows, desc="RSS downloads", unit="feed"):
 
     podcast_name = row.get("podcast_name") or row.get("id")
     # Log which podcast we're fetching
-    print(f"Fetching RSS feed for: {podcast_name}")
+    #print(f"Fetching RSS feed for: {podcast_name}")
 
-    time.sleep(5)
+    time.sleep(4)
     response = requests.get(rss_url, timeout=60)
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to fetch RSS for id={row.get('id')}: HTTP {response.status_code}")
+    # Update status_code back to Supabase for this row
+    status = response.status_code
+    upd = requests.patch(
+        REST_URL,
+        headers={**HEADERS, "Content-Type": "application/json"},
+        params={"id": f"eq.{row.get('id')}"},
+        data=json.dumps({"status_code": status}),
+        timeout=30,
+    )
+    if upd.status_code not in (200, 204):
+        print(f"Failed to update status_code for id={row.get('id')}: HTTP {upd.status_code} - {upd.text}")
+    if status != 200:
+        print(f"Failed to fetch RSS for id={row.get('id')}: HTTP {status}")
+        continue
 
     # Save the RSS feed response (use id to ensure uniqueness)
     output_file = f"{row.get('id')}_rss.xml"
