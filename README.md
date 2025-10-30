@@ -8,7 +8,7 @@ Find out **who’s talking about a company or person** in any Swedish podcast. A
 
 ### Tech Stack
 
-1. Use Supabase free tier to set up a simple database for storing the initial data.
+1. Use Supabase to set up a simple database for storing the initial data. As i have a paid plan here already.
 
 2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage. My estimation is that i need about 8TB (€120 per month) of storeage space and scaleway only gives 750GB for free. We will probably need about 18TB (€180) of transfer. The total cost of this project would be some where around €300 for storage on scaleway.
 
@@ -18,7 +18,7 @@ Find out **who’s talking about a company or person** in any Swedish podcast. A
 
 5. The next step is to build our own search engine, or use Pinecone; TBD.
 
-6. Finally, create a nice UI.
+6. Finally, create a nice UI mabye built with lovable?
 
 ---
 
@@ -45,6 +45,25 @@ Fetch each RSS file and save it (plus metadata).
 #### Step 4
 
 Process RSS data for search and analysis.
+
+
+#### Step 5
+Do some ETL, Extract and load to database.
+
+
+#### Step 6 
+Download all the mp3s.
+
+
+#### Step 7
+Transcribe all the mp3s.
+
+#### Step 8
+Build a search function
+
+
+#### Step 9
+Build a UI
 
 ---
 
