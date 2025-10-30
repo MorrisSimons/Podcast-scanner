@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import boto3
+from boto3.s3.transfer import TransferConfig
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,17 +36,25 @@ s3_client = session.client(
     aws_secret_access_key=aws_secret_access_key
 )
 
+# Configure multipart uploads for improved throughput and resilience
+transfer_config = TransferConfig(
+    multipart_threshold=5 * 1024 * 1024,
+    multipart_chunksize=16 * 1024 * 1024,
+    max_concurrency=4,
+    use_threads=True,
+)
+
 
 def upload_from_url_to_s3(url: str, key: str) -> None:
-    resp = requests.get(url, stream=True, timeout=60)
+    resp = requests.get(url, stream=True, timeout=(10, 600))
     resp.raise_for_status()
     resp.raw.decode_content = True
-    s3_client.upload_fileobj(resp.raw, bucket_name, key)
+    s3_client.upload_fileobj(resp.raw, bucket_name, key, Config=transfer_config)
 
 
-def update_episode_status(episode_id: str, supabase_url: str, headers: dict) -> None:
+def update_episode_status(episode_id: str, supabase_url: str, headers: dict, status: bool) -> None:
     url = f"{supabase_url.rstrip('/')}/rest/v1/episodes?id=eq.{episode_id}"
-    data = {"mp3_download_status": True}
+    data = {"mp3_download_status": status}
     resp = requests.patch(url, json=data, headers=headers, timeout=60)
     if resp.status_code != 204:
         raise RuntimeError(f"Failed to update episode {episode_id}: HTTP {resp.status_code} - {resp.text}")
@@ -63,11 +72,25 @@ def process_episode(row: dict, supabase_url: str, headers: dict) -> str:
     key = f"{podcast_id}/{filename}"
     
     print(f"Uploading {audio_url} -> s3://{bucket_name}/{key}")
-    upload_from_url_to_s3(audio_url, key)
-    update_episode_status(episode_id, supabase_url, headers)
-    print(f"Episode {episode_id} marked as downloaded.")
-    
-    return episode_id
+
+    success = True
+    try:
+        upload_from_url_to_s3(audio_url, key)
+    except Exception as e:
+        print(f"Upload failed for episode {episode_id}: {e}")
+        success = False
+
+    try:
+        update_episode_status(episode_id, supabase_url, headers, success)
+    except Exception as e:
+        print(f"Status update failed for episode {episode_id}: {e}")
+
+    if success:
+        print(f"Episode {episode_id} marked as downloaded.")
+        return episode_id
+    else:
+        print(f"Episode {episode_id} marked as NOT downloaded.")
+        return None
 
 
 def main() -> None:
@@ -83,14 +106,14 @@ def main() -> None:
     }
     
     offset = 0
-    page_size = 500
+    page_size = 3
     total_uploaded = 0
     
     while True:
         params = {
             "select": "id,podcast_id,audio_url,title",
             "audio_url": "is.not_null",
-            "mp3_download_status": "is.false",
+            "or": "(mp3_download_status.is.null,mp3_download_status.is.false)",
             "order": "pub_date.desc.nullslast",
             "limit": str(page_size),
             "offset": str(offset),
@@ -104,7 +127,7 @@ def main() -> None:
         if not rows:
             break
         
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(process_episode, row, SUPABASE_URL, headers) for row in rows]
             for future in as_completed(futures):
                 episode_id = future.result()
