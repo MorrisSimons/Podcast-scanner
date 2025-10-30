@@ -10,9 +10,9 @@ Find out **who’s talking about a company or person** in any Swedish podcast. A
 
 1. Use Supabase free tier to set up a simple database for storing the initial data.
 
-2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage—again, using the free tier as much as possible.
+2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage. My estimation is that i need about 8TB (€120 per month) of storeage space and scaleway only gives 750GB for free. We will probably need about 18TB (€180) of transfer. The total cost of this project would be some where around €300 for storage on scaleway.
 
-3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss!
+3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. To store this text data we might want to use Cassandra.
 
 4. In the GPU cluster, we’ll use a Whisper model to transcribe the data, or possibly another model that works well with Swedish.
 
@@ -53,7 +53,17 @@ Process RSS data for search and analysis.
 I wanted a way to find where all Swedish podcasts are listed and found this endpoint:
 `https://api.mediafacts.se/api/podcast/v1/podcasts`
 
-That request returns every podcast ID and name in Sweden.
+That request returns every podcast ID and name in Sweden (approx 2400)
+
+```json
+{
+    "adb8141c-fb56-4092-6f88-08dbd636bc42": "#Fallet",
+    "e1e3a139-1b65-4a43-f843-08dbaa32d14e": "#FPLSVERIGE",
+    ...
+    "866dcf58-058d-4468-b0da-08dd8c879318": "...och bilen går bra?",
+}
+```
+
 With that ID, we can get full details:
 
 ```bash
@@ -168,7 +178,7 @@ Most of them follow the same iTunes XML layout:
 ```
 
 
-### we manage to scrape about 326k podcasts
+### we manage to scrape about 326k podcasts in Step 5 of our ETL pipeline
 
 ![Example screenshot of scraped podcast data](assets/database-supabase.png)
 
