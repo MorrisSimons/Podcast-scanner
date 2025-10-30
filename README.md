@@ -6,19 +6,19 @@
 Find out **who’s talking about a company or person** in any Swedish podcast. Also just cool to have this kind of data and database.
 
 
-### Techstack
+### Tech Stack
 
-1. Supabase free tier to spin up a simple database to store the early data.
+1. Use Supabase free tier to set up a simple database for storing the initial data.
 
-2. When we get more data and need to store files the plan is to use scaleway S3 storage, also here free tier as far as possible.
+2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage—again, using the free tier as much as possible.
 
-3. When we have the MP3 we need to transcribe all the podcasts here im going to use a couple of H200 GPUs, we have a small GPU cluster of 8 of them for 500,000 euro at work; Thanks boss ly.
+3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss!
 
-4. in the gpu cluster we are going to throw in a whisper model to transcibe the data or mabye a model that is good a swedish.
+4. In the GPU cluster, we’ll use a Whisper model to transcribe the data, or possibly another model that works well with Swedish.
 
-5. last step build my own search engine or pinecone; TBD
+5. The next step is to build our own search engine, or use Pinecone; TBD.
 
-6. then a nice UI. 
+6. Finally, create a nice UI.
 
 ---
 
