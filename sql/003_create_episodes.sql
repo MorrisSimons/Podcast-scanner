@@ -23,6 +23,7 @@ create table if not exists public.episodes (
   transcript_url text,                  -- e.g., <podcast:transcript url>
   chapters jsonb,                       -- e.g., parsed from <podcast:chapters url>
   source text,                          -- provider/file this came from
+  status_code integer,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (podcast_id, guid)
