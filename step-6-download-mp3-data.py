@@ -7,7 +7,7 @@ load_dotenv()
 
 
 def fetch_episodes() -> list[dict]:
-    """Fetch episodes with audio URLs from Supabase (max 1000)"""
+    """Fetch episodes with audio URLs from Supabase (max 150)"""
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     
@@ -20,13 +20,13 @@ def fetch_episodes() -> list[dict]:
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
     }
     
-    # Fetch up to 1000 (PostgREST default max per request)
+    # Fetch up to 150 (PostgREST default max per request)
     params = {
         "select": "id,podcast_id,audio_url",
         "audio_url": "is.not_null",
-        "or": "(mp3_download_status.is.null,mp3_download_status.is.false)",
+        "or": "(mp3_download_status.is.null)",
         "order": "pub_date.desc.nullslast",
-        "limit": "250"
+        "limit": "150"
     }
     r = requests.get(base, headers=headers, params=params, timeout=90)
     if r.status_code != 200:
@@ -58,8 +58,8 @@ def fetch_episodes() -> list[dict]:
 #            raise RuntimeError(f"Failed to mark episode {episode_id} in-progress: HTTP {resp.status_code} - {resp.text}")
 
 
-def create_batches(episodes: list[dict], batches_count: int = 25, items_per_batch: int = 10) -> list[list[dict]]:
-    """Create batches with specified structure: 20 batches with 25 episodes each"""
+def create_batches(episodes: list[dict], batches_count: int = 15, items_per_batch: int = 10) -> list[list[dict]]:
+    """Create batches with specified structure: 15 batches with 10 episodes each"""
     batch_size = items_per_batch
     batches = []
     
@@ -83,15 +83,15 @@ def send_to_triform(batches: list[list[list[dict]]]):
         "Authorization": ingress_token,
         "Content-Type": "application/json"
     }
-    payload = {"batches": batches}
-    print(json.dumps(payload, indent=2))
+    payload = {"sample_input": batches}
+ 
     
     # Save payload to JSON file
     with open("payload.json", "w") as f:
         json.dump(payload, f, indent=2)
     print("Payload saved to payload.json")
     
-    response = requests.post(api_url, json=payload, headers=headers, timeout=60)
+    response = requests.post(api_url, json=payload, headers=headers)
     if response.status_code not in [200, 201, 202]:
         raise RuntimeError(f"Triform API request failed: HTTP {response.status_code} - {response.text}")
     
@@ -100,14 +100,23 @@ def send_to_triform(batches: list[list[list[dict]]]):
 
 
 def main() -> None:
-    episodes = fetch_episodes()
-    print(f"Fetched {len(episodes)} episodes from Supabase")
+    iteration = 0
+    while True:
+        iteration += 1
+        print(f"\n=== Iteration {iteration} ===")
+        
+        episodes = fetch_episodes()
+        print(f"Fetched {len(episodes)} episodes from Supabase")
+        
+        if not episodes:
+            print("No more episodes to process. Database is empty.")
+            break
 
-    batches = create_batches(episodes)
-    print(f"Created {len(batches)} batches")
-    
-    response = send_to_triform(batches)
-    print(f"Response: {response.text}")
+        batches = create_batches(episodes)
+        print(f"Created {len(batches)} batches")
+        
+        response = send_to_triform(batches)
+        print(f"Response: {response.text}")
 
 
 if __name__ == "__main__":

@@ -10,12 +10,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class Inputs(TypedDict):
-    batches: list[list[dict[str, Any]]]  # List of batches, each batch has up to 400 episode dicts
+    sample_input: list[dict[str, Any]]  # List of episode dicts
 
 class Outputs(TypedDict):
     success: bool
-    episode_id: str
-    sample_input: dict[str, Any]
     error_message: str | None
 
 
@@ -106,6 +104,7 @@ def process_episode(row: dict, supabase_url: str, headers: dict) -> str:
 
 @triform.entrypoint
 def main(inputs: Inputs) -> Outputs:
+    print(inputs)
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     
@@ -119,24 +118,20 @@ def main(inputs: Inputs) -> Outputs:
         "Prefer": "return=minimal"
     }
     
-    batches = inputs.get("batches", [])
+    episodes = inputs.get("sample_input", [])
+    print(episodes)
     total_uploaded = 0
     
-    for batch in batches:
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(process_episode, row, supabase_url, headers) for row in batch]
-            for future in as_completed(futures):
-                episode_id = future.result()
-                if episode_id:
-                    total_uploaded += 1
-        
-        print(f"Processed batch, total uploaded so far: {total_uploaded}")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_episode, row, supabase_url, headers) for row in episodes]
+        for future in as_completed(futures):
+            episode_id = future.result()
+            if episode_id:
+                total_uploaded += 1
     
     print(f"Successfully uploaded {total_uploaded} episodes to S3.")
     
     return Outputs(
         success=True,
-        episode_id="",
-        sample_input=batches[0][0] if batches and batches[0] else {},
         error_message=None
     )
