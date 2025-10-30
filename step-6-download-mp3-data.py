@@ -90,11 +90,15 @@ def send_to_triform(batches: list[list[list[dict]]]):
  
    
     response = requests.post(api_url, json=payload, headers=headers)
+    if response.status_code == 504:
+        # Gateway timeout - return response to handle in main loop
+        return response
     if response.status_code not in [200, 201, 202]:
         raise RuntimeError(f"Triform API request failed: HTTP {response.status_code} - {response.text}")
     
     print(f"Successfully sent {len(batches)} batches to Triform")
     return response
+
 
 
 def log_to_csv(iteration: int, timestamp: str, episodes_count: int, batches_count: int,
@@ -175,6 +179,19 @@ def main() -> None:
         print(f"[{timestamp}] Response status: {response.status_code}")
         print(f"[{timestamp}] Response: {response.text}")
         
+        # Handle 504 timeout
+        if response.status_code == 504:
+            print(f"[{timestamp}] WARNING: Triform returned 504 Gateway Timeout")
+            print(f"[{timestamp}] Sleeping for 30 seconds before retrying...")
+            time.sleep(30)
+            print(f"[{timestamp}] Retrying Triform API request...")
+            response = send_to_triform(batches)
+            print(f"[{timestamp}] Retry response status: {response.status_code}")
+            print(f"[{timestamp}] Retry response: {response.text}")
+            
+            # If still 504 after retry, skip this batch
+            if response.status_code == 504:
+                raise RuntimeError("Triform still returning 504 after retry")
         # Log to CSV
         log_to_csv(
             iteration=iteration,
