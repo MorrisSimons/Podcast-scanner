@@ -106,7 +106,7 @@ def main() -> None:
     }
     
     offset = 0
-    page_size = 3
+    page_size = 1000
     total_uploaded = 0
     
     while True:
@@ -127,7 +127,7 @@ def main() -> None:
         if not rows:
             break
         
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=40) as executor:
             futures = [executor.submit(process_episode, row, SUPABASE_URL, headers) for row in rows]
             for future in as_completed(futures):
                 episode_id = future.result()

@@ -168,5 +168,9 @@ Most of them follow the same iTunes XML layout:
 ```
 
 
-### we manage to scrape 
+### we manage to scrape about 326k podcasts
 
+![Example screenshot of scraped podcast data](assets/database-supabase.png)
+
+
+### Next step will be to explore the data.
