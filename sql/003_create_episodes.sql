@@ -23,9 +23,9 @@ create table if not exists public.episodes (
   transcript_url text,                  -- e.g., <podcast:transcript url>
   chapters jsonb,                       -- e.g., parsed from <podcast:chapters url>
   source text,                          -- provider/file this came from
-  status_code integer,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  mp3_download_status boolean,          -- true when audio uploaded to S3
   unique (podcast_id, guid)
 );
 
@@ -41,6 +41,22 @@ begin
       add constraint episodes_podcast_guid_unique unique (podcast_id, guid);
   end if;
 end $$;
+
+-- Unique index on podcast_id and audio_url where audio_url is not null
+create unique index if not exists episodes_podcast_audio_unique on public.episodes (podcast_id, audio_url)
+where audio_url is not null;
+
+-- Index on podcast_id and pub_date for efficient episode queries
+create index if not exists episodes_podcast_pubdate_idx on public.episodes (podcast_id, pub_date desc);
+
+-- Index on guid for fast lookups
+create index if not exists episodes_guid_idx on public.episodes (guid);
+
+-- Index on audio_url for S3 upload queries
+create index if not exists episodes_audio_url_idx on public.episodes (audio_url);
+
+-- Index on mp3_download_status for filtering undownloaded episodes
+create index if not exists episodes_mp3_download_status_idx on public.episodes (mp3_download_status);
 
 do $$
 begin

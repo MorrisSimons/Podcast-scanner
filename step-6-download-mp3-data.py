@@ -2,6 +2,7 @@ import sys
 import os
 from pathlib import Path
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import boto3
@@ -42,6 +43,33 @@ def upload_from_url_to_s3(url: str, key: str) -> None:
     s3_client.upload_fileobj(resp.raw, bucket_name, key)
 
 
+def update_episode_status(episode_id: str, supabase_url: str, headers: dict) -> None:
+    url = f"{supabase_url.rstrip('/')}/rest/v1/episodes?id=eq.{episode_id}"
+    data = {"mp3_download_status": True}
+    resp = requests.patch(url, json=data, headers=headers, timeout=60)
+    if resp.status_code != 204:
+        raise RuntimeError(f"Failed to update episode {episode_id}: HTTP {resp.status_code} - {resp.text}")
+
+
+def process_episode(row: dict, supabase_url: str, headers: dict) -> str:
+    """Process a single episode: download and mark as complete."""
+    audio_url = row.get("audio_url")
+    if not audio_url:
+        return None
+    
+    episode_id = row.get("id")
+    podcast_id = row.get("podcast_id") or "unknown"
+    filename = Path(urlparse(audio_url).path).name or "audio.mp3"
+    key = f"{podcast_id}/{filename}"
+    
+    print(f"Uploading {audio_url} -> s3://{bucket_name}/{key}")
+    upload_from_url_to_s3(audio_url, key)
+    update_episode_status(episode_id, supabase_url, headers)
+    print(f"Episode {episode_id} marked as downloaded.")
+    
+    return episode_id
+
+
 def main() -> None:
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -53,32 +81,40 @@ def main() -> None:
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
     }
-    params = {
-        "select": "podcast_id,audio_url,title",
-        "audio_url": "is.not_null",
-        "order": "pub_date.desc.nullslast",
-        "limit": "3",
-    }
     
-    r = requests.get(base, headers=headers, params=params, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Supabase episodes fetch failed: HTTP {r.status_code} - {r.text}")
+    offset = 0
+    page_size = 500
+    total_uploaded = 0
     
-    rows = r.json()
-    if not rows:
-        raise RuntimeError("No episodes with non-null audio_url found in database")
+    while True:
+        params = {
+            "select": "id,podcast_id,audio_url,title",
+            "audio_url": "is.not_null",
+            "mp3_download_status": "is.false",
+            "order": "pub_date.desc.nullslast",
+            "limit": str(page_size),
+            "offset": str(offset),
+        }
+        
+        r = requests.get(base, headers=headers, params=params, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"Supabase episodes fetch failed: HTTP {r.status_code} - {r.text}")
+        
+        rows = r.json()
+        if not rows:
+            break
+        
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(process_episode, row, SUPABASE_URL, headers) for row in rows]
+            for future in as_completed(futures):
+                episode_id = future.result()
+                if episode_id:
+                    total_uploaded += 1
+        
+        offset += page_size
+        print(f"Processed batch, total uploaded so far: {total_uploaded}")
     
-    for row in rows:
-        audio_url = row.get("audio_url")
-        if not audio_url:
-            continue
-        podcast_id = row.get("podcast_id") or "unknown"
-        filename = Path(urlparse(audio_url).path).name or "audio.mp3"
-        key = f"{podcast_id}/{filename}"
-        print(f"Uploading {audio_url} -> s3://{bucket_name}/{key}")
-        upload_from_url_to_s3(audio_url, key)
-    
-    print(f"Successfully uploaded {len(rows)} episodes to S3.")
+    print(f"Successfully uploaded {total_uploaded} episodes to S3.")
 
 
 if __name__ == "__main__":
