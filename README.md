@@ -12,7 +12,7 @@ Find out **who’s talking about a company or person** in any Swedish podcast. A
 
 2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage. My estimation is that i need about 8TB (€120 per month) of storeage space and scaleway only gives 750GB for free. We will probably need about 18TB (€180) of transfer. The total cost of this project would be some where around €300 for storage on scaleway.
 
-3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. To store this text data we might want to use Cassandra.
+3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. To store this text data we might want to use Cassandra. We use Grafana to monitor our scale way metrics, its quick to set up via 
 
 4. In the GPU cluster, we’ll use a Whisper model to transcribe the data, or possibly another model that works well with Swedish.
 
@@ -203,3 +203,12 @@ Most of them follow the same iTunes XML layout:
 
 
 ### Next step will be to explore the data.
+
+
+
+#### The download part of the mp3s
+
+My first solution was to run it from my PC but the speed wasn't cutting it. I was downloading about 3000 podcasts an hour so this would take like 100 hours. So I started testing one of our new features - Parallel loop on Triform. It works by sending in a list of URLs where each item gets downloaded in its own action. Downloads are perfect for multithreading so I spun up 10 threads and sent in 20 items per action to keep a pool going since some podcasts are 3 min and others are over an hour. There's probably faster ways to do it but Triform's actions are pretty small so I managed to max out the CPU utilization with this setup. Also there are some limitations to the payloads siceces both on output and input. 
+
+Anyway using Triform I got it down from ~100 hours to ~30 hours and went from 3000 podcasts per hour to about 9000 per hour.
+
