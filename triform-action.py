@@ -96,8 +96,8 @@ def process_episode(row: dict, supabase_url: str, headers: dict) -> str:
     
     episode_id = row.get("id")
     podcast_id = row.get("podcast_id") or "unknown"
-    filename = Path(urlparse(audio_url).path).name or "audio.mp3"
-    key = f"{podcast_id}/{filename}"
+    ext = Path(urlparse(audio_url).path).suffix or ".mp3"
+    key = f"{podcast_id}/{episode_id}{ext}"
     
     print(f"Uploading {audio_url} -> s3://{bucket_name}/{key}")
 

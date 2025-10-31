@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kb-whisper-transcribe
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: transcriber
+        image: YOUR_REGISTRY/kb-whisper-transcriber:latest
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+        env:
+        - name: S3_REGION
+          value: "pl-waw"          # set your region
+        - name: S3_ENDPOINT_URL
+          value: "https://s3.YOUR_ENDPOINT"
+        - name: S3_ACCESS_KEY_ID
+          value: "YOUR_ACCESS_KEY"
+        - name: S3_SECRET_ACCESS_KEY
+          value: "YOUR_SECRET_KEY"
+        - name: S3_BUCKET
+          value: "YOUR_BUCKET"
+        # Optional: process only a subfolder
+        # - name: S3_PREFIX
+        #   value: "optional/prefix/"
+

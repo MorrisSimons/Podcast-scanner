@@ -7,6 +7,9 @@ from typing import Any, Dict, List, Optional
 import boto3
 from faster_whisper import WhisperModel
 from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def make_s3_client():
@@ -18,6 +21,11 @@ def make_s3_client():
         aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY"),
     )
     bucket = os.getenv("S3_BUCKET")
+    print(f"S3_BUCKET: {bucket}")
+    print(f"S3_REGION: {os.getenv('S3_REGION')}")
+    print(f"S3_ENDPOINT_URL: {os.getenv('S3_ENDPOINT_URL')}")
+    print(f"S3_ACCESS_KEY_ID: {os.getenv('S3_ACCESS_KEY_ID')}")
+    print(f"S3_SECRET_ACCESS_KEY: {os.getenv('S3_SECRET_ACCESS_KEY')}")
     if not bucket:
         raise ValueError("S3_BUCKET is required")
     return s3, bucket
@@ -27,7 +35,10 @@ def list_audio_keys(s3, bucket: str, prefix: Optional[str]) -> List[str]:
     audio_suffixes = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".opus")
     paginator = s3.get_paginator("list_objects_v2")
     keys: List[str] = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix or ""):
+    params = {"Bucket": bucket}
+    if prefix:
+        params["Prefix"] = prefix
+    for page in paginator.paginate(**params):
         for obj in page.get("Contents", []) :
             key = obj.get("Key")
             if key and key.lower().endswith(audio_suffixes):
@@ -99,31 +110,38 @@ def main() -> None:
         print("No audio files found in S3 to transcribe.")
         return
 
+    # Limit to 3 files for testing
+    audio_keys = audio_keys[:3]
+    
     print(f"Found {len(audio_keys)} audio file(s) to consider.")
     model = build_model()
 
+    # Create output directory
+    output_dir = Path("output_speach_to_text")
+    output_dir.mkdir(exist_ok=True)
+
     processed = 0
     for key in audio_keys:
-        t_key = transcript_key_for(key)
-        if transcript_exists(s3, bucket, t_key):
-            print(f"[skip] Transcript exists for {key} -> s3://{bucket}/{t_key}")
-            continue
-
         print(f"[download] s3://{bucket}/{key}")
         local_path = download_from_s3(s3, bucket, key)
 
         print(f"[transcribe] {local_path.name} …")
         result = transcribe_file(model, local_path)
 
-        # Upload .txt transcript back to same S3 folder (same basename)
+        # Save transcript locally
         plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
-        s3.put_object(
-            Bucket=bucket,
-            Key=t_key,
-            Body=plain_text.encode("utf-8"),
-            ContentType="text/plain; charset=utf-8",
-        )
-        print(f"[upload] s3://{bucket}/{t_key}")
+        output_filename = Path(key).stem + ".txt"
+        output_path = output_dir / output_filename
+        output_path.write_text(plain_text, encoding="utf-8")
+        print(f"[saved] {output_path}")
+
+        # Upload transcript to S3 (Scaleway)
+        transcript_key = transcript_key_for(key)
+        if not transcript_exists(s3, bucket, transcript_key):
+            s3.upload_file(str(output_path), bucket, transcript_key)
+            print(f"[uploaded] s3://{bucket}/{transcript_key}")
+        else:
+            print(f"[skip exists] s3://{bucket}/{transcript_key}")
         processed += 1
 
     print(f"Completed transcription for {processed} file(s).")

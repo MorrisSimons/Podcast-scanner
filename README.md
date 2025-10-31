@@ -215,13 +215,6 @@ Anyway using Triform I got it down from ~100 hours to ~30 hours and went from 30
 We save the files in our S3 bucket using the podcast_id, since it’s unique for each podcast. As shown by this query, each id is unique. I also chose to organize the files in a folder within the bucket. While S3 doesn't have true folders (it only appears that way in the UI), using folders doesn't affect performance and allows us to store related metadata or output text alongside the files in that folder.
 
 
-```
-SELECT id, COUNT(*) AS occurrences
-FROM public.podcasts
-GROUP BY id
-HAVING COUNT(*) > 1
-ORDER BY occurrences DESC, id;
-```
 
 
 
