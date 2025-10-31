@@ -204,11 +204,25 @@ Most of them follow the same iTunes XML layout:
 
 ### Next step will be to explore the data.
 
-
+---
 
 #### The download part of the mp3s
 
-My first solution was to run it from my PC but the speed wasn't cutting it. I was downloading about 3000 podcasts an hour so this would take like 100 hours. So I started testing one of our new features - Parallel loop on Triform. It works by sending in a list of URLs where each item gets downloaded in its own action. Downloads are perfect for multithreading so I spun up 10 threads and sent in 20 items per action to keep a pool going since some podcasts are 3 min and others are over an hour. There's probably faster ways to do it but Triform's actions are pretty small so I managed to max out the CPU utilization with this setup. Also there are some limitations to the payloads siceces both on output and input. 
+My first solution was to run it from my PC but the speed wasn't cutting it. I was downloading about 3000 podcasts an hour so this would take like 100 hours. So I started testing one of our new features - Parallel loop on Triform. It works by sending in a list in our case a list of URLs where each list  gets handled in its own action. Downloads are great to multithread so I spun up 10 threads and sent in 20 items per action to keep a pool going since some podcasts are 3 min and others are over an hour. There's probably faster ways to do it but Triform's actions are pretty small so I managed to max out the CPU utilization with this setup. Also there are some limitations to the payloads siceces both on output and input (TODO: we are going to fix that) plus some limitaions on how long an action can run for now that limitation is 15 minutes.
 
 Anyway using Triform I got it down from ~100 hours to ~30 hours and went from 3000 podcasts per hour to about 9000 per hour.
+
+We save the files in our S3 bucket using the podcast_id, since it’s unique for each podcast. As shown by this query, each id is unique. I also chose to organize the files in a folder within the bucket. While S3 doesn't have true folders (it only appears that way in the UI), using folders doesn't affect performance and allows us to store related metadata or output text alongside the files in that folder.
+
+
+```
+SELECT id, COUNT(*) AS occurrences
+FROM public.podcasts
+GROUP BY id
+HAVING COUNT(*) > 1
+ORDER BY occurrences DESC, id;
+```
+
+
+
 

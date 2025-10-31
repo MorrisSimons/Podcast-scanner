@@ -27,7 +27,7 @@ def fetch_episodes() -> list[dict]:
     params = {
         "select": "id,podcast_id,audio_url",
         "audio_url": "is.not_null",
-        "or": "(mp3_download_status.is.null)",
+        "mp3_download_status": "is.null",
         "order": "pub_date.desc.nullslast",
         "limit": "300"
     }
@@ -36,29 +36,6 @@ def fetch_episodes() -> list[dict]:
         raise RuntimeError(f"Supabase episodes fetch failed: HTTP {r.status_code} - {r.text}")
     
     return r.json() or []
-
-
-#def mark_episodes_in_progress(episodes: list[dict]) -> None:
-#    """Mark fetched episodes as in-progress (mp3_download_status: true)"""
-#    SUPABASE_URL = os.getenv("SUPABASE_URL")
-#    SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-#    
-#    base = SUPABASE_URL.rstrip("/") + "/rest/v1/episodes"
-#    headers = {
-#        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-#        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-#    }
-#    
-#    for episode in episodes:
-#        episode_id = episode.get("id")
-#        if not episode_id:
-#            continue
-#        
-#        url = f"{base}?id=eq.{episode_id}"
-#        data = {"mp3_download_status": True}
-#        resp = requests.patch(url, json=data, headers=headers, timeout=60)
-#        if resp.status_code != 204:
-#            raise RuntimeError(f"Failed to mark episode {episode_id} in-progress: HTTP {resp.status_code} - {resp.text}")
 
 
 def create_batches(episodes: list[dict], batches_count: int = 15, items_per_batch: int = 20) -> list[list[dict]]:
@@ -149,7 +126,6 @@ def main() -> None:
         print(f"ITERATION {iteration} - {timestamp}")
         print(f"{'='*60}")
         
-        # Time Supabase fetch
         print(f"[{timestamp}] Fetching episodes from Supabase...")
         supabase_start = time.time()
         episodes = fetch_episodes()
@@ -189,7 +165,7 @@ def main() -> None:
             print(f"[{timestamp}] Retry response status: {response.status_code}")
             print(f"[{timestamp}] Retry response: {response.text}")
             
-            # If still 504 after retry, skip this batch
+            # If still 504 after retry, skip this batch #TODO: Handle this better because we dont need to crash here just retry until it wokrs.
             if response.status_code == 504:
                 raise RuntimeError("Triform still returning 504 after retry")
         # Log to CSV

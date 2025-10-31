@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 
 class Inputs(TypedDict):
@@ -62,9 +63,29 @@ def upload_from_url_to_s3(url: str, key: str) -> None:
 def update_episode_status(episode_id: str, supabase_url: str, headers: dict, status: bool) -> None:
     url = f"{supabase_url.rstrip('/')}/rest/v1/episodes?id=eq.{episode_id}"
     data = {"mp3_download_status": status}
-    resp = requests.patch(url, json=data, headers=headers, timeout=60)
-    if resp.status_code != 204:
-        raise RuntimeError(f"Failed to update episode {episode_id}: HTTP {resp.status_code} - {resp.text}")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.patch(url, json=data, headers=headers, timeout=60)
+            if resp.status_code == 502:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"502 error, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise RuntimeError(f"Failed to update episode {episode_id}: HTTP 502 after {max_retries} retries")
+            elif resp.status_code != 204:
+                raise RuntimeError(f"Failed to update episode {episode_id}: HTTP {resp.status_code} - {resp.text}")
+            return
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"Request error, retrying in {wait_time}s: {e}")
+                time.sleep(wait_time)
+            else:
+                raise RuntimeError(f"Failed to update episode {episode_id}: {e}")
 
 
 def process_episode(row: dict, supabase_url: str, headers: dict) -> str:
