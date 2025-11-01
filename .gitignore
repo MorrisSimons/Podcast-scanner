@@ -8,3 +8,6 @@ cache/
 k8s/
 
 .yaml
+
+SSL_redis-redis-epic-wing.pem
+redis-queue-setup.md

@@ -74,10 +74,12 @@ def download_from_s3(s3, bucket: str, key: str) -> Path:
 
 def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
     device = "cuda"  # node is GPU; fail fast if CUDA unavailable
-    compute_type = "float16"
+    compute_type = os.getenv("COMPUTE_TYPE", "float16")
+    device_index = int(os.getenv("CUDA_DEVICE_INDEX", "0"))
     return WhisperModel(
         "KBLab/kb-whisper-large",
         device=device,
+        device_index=device_index,
         compute_type=compute_type,
         download_root=cache_dir,
     )
@@ -89,7 +91,7 @@ def transcribe_file(model: WhisperModel, audio_path: Path) -> Dict[str, Any]:
         language="sv",
         task="transcribe",
         vad_filter=True,
-        beam_size=12,
+        beam_size=2,
         temperature=0.0,
         condition_on_previous_text=False,
     )

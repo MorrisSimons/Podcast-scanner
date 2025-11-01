@@ -12,7 +12,7 @@ Find out **who’s talking about a company or person** in any Swedish podcast. A
 
 2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage. My estimation is that i need about 8TB (€120 per month) of storeage space and scaleway only gives 750GB for free. We will probably need about 18TB (€180) of transfer. The total cost of this project would be some where around €300 for storage on scaleway.
 
-3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. To store this text data we might want to use Cassandra. But to save time we will just upload the text data next to the mp3 with same name. We use Grafana to monitor our scale way metrics, its quick to set up via scaleway.
+3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. But to save time we will just upload the text data next to the mp3 with same name. We use Grafana to monitor our scale way metrics, its quick to set up via scaleway.
 
 4. In the GPU cluster, we’ll use a KB-Whisper model to transcribe the data. KB stands for Kungliga Bibloteket that have a whisper model trained on 50T hours of data. They managed to reduce error by ~48% on swedish text data.
 
@@ -215,7 +215,17 @@ Anyway using Triform I got it down from ~100 hours to ~30 hours and went from 30
 Okay, here’s how I did it: Dump everything in S3, but group by podcast_id. Each podcast gets its own “folder” (yeah, S3 doesn’t actually have folders, but whatever—it looks nice in the UI). Sticking files in these pseudo-folders doesn’t hurt performance and makes life easier when you want to shove metadata or transcripts next to the mp3s. Pro dev tip: just treat the folder structure as a namespace for sanity.
 
 
+DO SOME comments here
 
+```
 
+    segments, info = model.transcribe(
+        str(audio_path),
+        language="sv",
+        task="transcribe",
+        vad_filter=True,
+        beam_size=8,
+        temperature=0.0,
+        condition_on_previous_text=False,
 
-
+```
