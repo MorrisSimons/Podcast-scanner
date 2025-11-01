@@ -8,6 +8,7 @@ import boto3
 from faster_whisper import WhisperModel
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -114,9 +115,12 @@ def main() -> None:
         print("No audio files found in S3 to transcribe.")
         return
 
-    # Limit to 3 files for testing
-    audio_keys = audio_keys[:3]
-    
+    # Skip files that already have a same-name transcript in S3
+    audio_keys = [k for k in audio_keys if not transcript_exists(s3, bucket, transcript_key_for(k))]
+    if not audio_keys:
+        print("No audio files require transcription (transcripts already exist).")
+        return
+
     print(f"Found {len(audio_keys)} audio file(s) to consider.")
     model = build_model()
 
@@ -125,11 +129,11 @@ def main() -> None:
     output_dir.mkdir(exist_ok=True)
 
     processed = 0
-    for key in audio_keys:
-        print(f"[download] s3://{bucket}/{key}")
+    for key in tqdm(audio_keys, desc="Transcribing", unit="file", file=sys.stderr, disable=False, ncols=80):
+        tqdm.write(f"[download] s3://{bucket}/{key}", file=sys.stderr)
         local_path = download_from_s3(s3, bucket, key)
 
-        print(f"[transcribe] {local_path.name} …")
+        tqdm.write(f"[transcribe] {local_path.name} …", file=sys.stderr)
         result = transcribe_file(model, local_path)
 
         # Save transcript locally
@@ -137,18 +141,18 @@ def main() -> None:
         output_filename = Path(key).stem + ".txt"
         output_path = output_dir / output_filename
         output_path.write_text(plain_text, encoding="utf-8")
-        print(f"[saved] {output_path}")
+        tqdm.write(f"[saved] {output_path}", file=sys.stderr)
 
         # Upload transcript to S3 (Scaleway)
         transcript_key = transcript_key_for(key)
         if not transcript_exists(s3, bucket, transcript_key):
             s3.upload_file(str(output_path), bucket, transcript_key)
-            print(f"[uploaded] s3://{bucket}/{transcript_key}")
+            tqdm.write(f"[uploaded] s3://{bucket}/{transcript_key}", file=sys.stderr)
         else:
-            print(f"[skip exists] s3://{bucket}/{transcript_key}")
+            tqdm.write(f"[skip exists] s3://{bucket}/{transcript_key}", file=sys.stderr)
         processed += 1
 
-    print(f"Completed transcription for {processed} file(s).")
+    print(f"\nCompleted transcription for {processed} file(s).")
 
 
 if __name__ == "__main__":

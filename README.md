@@ -12,9 +12,9 @@ Find out **who’s talking about a company or person** in any Swedish podcast. A
 
 2. As we accumulate more data and need to store files, the plan is to use Scaleway S3 storage. My estimation is that i need about 8TB (€120 per month) of storeage space and scaleway only gives 750GB for free. We will probably need about 18TB (€180) of transfer. The total cost of this project would be some where around €300 for storage on scaleway.
 
-3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. To store this text data we might want to use Cassandra. We use Grafana to monitor our scale way metrics, its quick to set up via 
+3. Once we have the MP3 files, we need to transcribe all the podcasts. I'll use a couple of H200 GPUs for this; we have 8 GPUs worth €500,000 at work that I can borrow for this project. Thanks, boss for supporting this!. To store this text data we might want to use Cassandra. But to save time we will just upload the text data next to the mp3 with same name. We use Grafana to monitor our scale way metrics, its quick to set up via scaleway.
 
-4. In the GPU cluster, we’ll use a Whisper model to transcribe the data, or possibly another model that works well with Swedish.
+4. In the GPU cluster, we’ll use a KB-Whisper model to transcribe the data. KB stands for Kungliga Bibloteket that have a whisper model trained on 50T hours of data. They managed to reduce error by ~48% on swedish text data.
 
 5. The next step is to build our own search engine, or use Pinecone; TBD.
 
@@ -44,7 +44,7 @@ Fetch each RSS file and save it (plus metadata).
 
 #### Step 4
 
-Process RSS data for search and analysis.
+Process RSS data for research and analysis to understand it.
 
 
 #### Step 5
@@ -212,7 +212,7 @@ My first solution was to run it from my PC but the speed wasn't cutting it. I wa
 
 Anyway using Triform I got it down from ~100 hours to ~30 hours and went from 3000 podcasts per hour to about 9000 per hour.
 
-We save the files in our S3 bucket using the podcast_id, since it’s unique for each podcast. As shown by this query, each id is unique. I also chose to organize the files in a folder within the bucket. While S3 doesn't have true folders (it only appears that way in the UI), using folders doesn't affect performance and allows us to store related metadata or output text alongside the files in that folder.
+Okay, here’s how I did it: Dump everything in S3, but group by podcast_id. Each podcast gets its own “folder” (yeah, S3 doesn’t actually have folders, but whatever—it looks nice in the UI). Sticking files in these pseudo-folders doesn’t hurt performance and makes life easier when you want to shove metadata or transcripts next to the mp3s. Pro dev tip: just treat the folder structure as a namespace for sanity.
 
 
 
