@@ -31,7 +31,21 @@ def fetch_episodes() -> list[dict]:
         "order": "pub_date.desc.nullslast",
         "limit": "300"
     }
-    r = requests.get(base, headers=headers, params=params, timeout=90)
+    # Retry on HTTP 500 with exponential backoff
+    max_attempts = 5
+    r = None
+    for attempt in range(1, max_attempts + 1):
+        r = requests.get(base, headers=headers, params=params, timeout=90)
+        if r.status_code == 500:
+            if attempt == max_attempts:
+                raise RuntimeError(
+                    f"Supabase episodes fetch failed after {max_attempts} attempts: HTTP 500 - {r.text}"
+                )
+            backoff_seconds = min(60, 2 ** (attempt - 1))
+            time.sleep(backoff_seconds)
+            continue
+        break
+
     if r.status_code != 200:
         raise RuntimeError(f"Supabase episodes fetch failed: HTTP {r.status_code} - {r.text}")
     

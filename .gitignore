@@ -3,5 +3,8 @@ venv/
 temp_rss_output/
 temp_failed_rss_output/
 aws/
-garbage_bin
-cache
+garbage_bin/
+cache/
+k8s/
+
+.yaml
