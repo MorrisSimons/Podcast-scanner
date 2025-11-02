@@ -245,66 +245,98 @@ def redis_worker_loop() -> None:
     stream = "podcast:queue"
     group = "workers"
 
-    last_reclaim = time.monotonic()
-    reclaim_interval = float(os.getenv("REDIS_RECLAIM_INTERVAL_SEC", "300"))
-    reclaim_idle_ms = int(os.getenv("REDIS_RECLAIM_IDLE_MS", str(int(timedelta(hours=2).total_seconds() * 1000))))
+    gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "64"))
+
     lock_ttl_sec = int(os.getenv("TRANSCRIBE_LOCK_TTL_SEC", str(int(timedelta(hours=6).total_seconds()))))
 
     while True:
         try:
-            # Periodic recovery of stale pending messages
-            now = time.monotonic()
-            if now - last_reclaim >= reclaim_interval:
-                try:
-                    res = r.xautoclaim(
-                        stream,
-                        group,
-                        consumer,
-                        min_idle_time=reclaim_idle_ms,
-                        start_id="0-0",
-                        count=100,
-                    )
-                    if isinstance(res, tuple):
-                        if len(res) == 3:
-                            next_id, claimed, _deleted = res
-                        else:
-                            next_id, claimed = res
-                    else:
-                        next_id, claimed = res, []
-                    for msg_id, fields in claimed:
+            # Read multiple messages at once for batch processing
+            msgs = r.xreadgroup(groupname=group, consumername=consumer, streams={stream: ">"}, count=gpu_batch_size, block=5000)
+            if not msgs:
+                continue
+            
+            # Collect messages for batch processing
+            batch_messages = []
+            for _stream, items in msgs:
+                for msg_id, fields in items:
+                    batch_messages.append((_stream, msg_id, fields))
+            
+            # Process batch if we have multiple messages
+            if len(batch_messages) > 1:
+                # Prepare batch
+                batch_keys = []
+                batch_paths = []
+                valid_messages = []
+                
+                for stream_name, msg_id, fields in batch_messages:
+                    try:
+                        key = _extract_key_from_message(fields)
+                        t_key = transcript_key_for(key)
+                        
+                        # Skip if transcript exists
+                        if transcript_exists(s3, bucket, t_key):
+                            r.xack(stream, group, msg_id)
+                            continue
+                        
+                        # Try to get lock
+                        lock_key = f"lock:transcribe:{t_key}"
+                        got_lock = r.set(lock_key, consumer, nx=True, ex=lock_ttl_sec)
+                        if not got_lock:
+                            continue  # Skip this message
+                        
+                        # Download audio
+                        paths = _cache_paths(cache_root, key)
+                        _download_if_needed(s3, bucket, key, paths["audio"])
+                        
+                        batch_keys.append(key)
+                        batch_paths.append(paths["audio"])
+                        valid_messages.append((stream_name, msg_id, fields, t_key, lock_key, paths))
+                    except Exception as e:
+                        print(f"Prep error for {msg_id}: {e}")
+                
+                # Batch transcribe if we have files
+                if batch_paths:
+                    try:
+                        results = transcribe_batch(model, batch_paths, batch_size=gpu_batch_size)
+
+                        # Process results
+                        for (stream_name, msg_id, fields, t_key, lock_key, paths), result in zip(valid_messages, results):
+                            try:
+                                if "error" not in result:
+                                    plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+                                    paths["out"].write_text(plain_text, encoding="utf-8")
+
+                                    if not transcript_exists(s3, bucket, t_key):
+                                        s3.upload_file(str(paths["out"]), bucket, t_key)
+
+                                    r.xack(stream, group, msg_id)
+                                    r.incr("podcast:processed_count")
+                                else:
+                                    print(f"Batch result for {t_key} failed: {result.get('error')}")
+                            finally:
+                                try:
+                                    r.delete(lock_key)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print(f"Batch processing error: {e}")
+                        traceback.print_exc()
+            else:
+                # Single message, process normally
+                for _stream, items in msgs:
+                    for msg_id, fields in items:
                         try:
-                            ok = process_message(r, s3, bucket, model, cache_root, (stream, msg_id, fields), consumer, lock_ttl_sec)
+                            ok = process_message(r, s3, bucket, model, cache_root, (_stream, msg_id, fields), consumer, lock_ttl_sec)
                             if ok:
                                 r.xack(stream, group, msg_id)
                                 r.incr("podcast:processed_count")
                         except ClientError as e:
-                            print(f"S3 error for reclaimed {msg_id}: {e}")
+                            print(f"S3 error for {msg_id}: {e}")
                             traceback.print_exc()
                         except Exception as e:
-                            print(f"Worker error for reclaimed {msg_id}: {e}")
+                            print(f"Worker error for {msg_id}: {e}")
                             traceback.print_exc()
-                except Exception as e:
-                    print(f"xautoclaim error: {e}")
-                    traceback.print_exc()
-                last_reclaim = now
-
-            msgs = r.xreadgroup(groupname=group, consumername=consumer, streams={stream: ">"}, count=1, block=30000)
-            if not msgs:
-                continue
-            # xreadgroup returns list of (stream, [(id, fields), ...])
-            for _stream, items in msgs:
-                for msg_id, fields in items:
-                    try:
-                        ok = process_message(r, s3, bucket, model, cache_root, (_stream, msg_id, fields), consumer, lock_ttl_sec)
-                        if ok:
-                            r.xack(stream, group, msg_id)
-                            r.incr("podcast:processed_count")
-                    except ClientError as e:
-                        print(f"S3 error for {msg_id}: {e}")
-                        traceback.print_exc()
-                    except Exception as e:
-                        print(f"Worker error for {msg_id}: {e}")
-                        traceback.print_exc()
         except KeyboardInterrupt:
             raise
         except Exception as loop_err:
@@ -336,6 +368,40 @@ def transcribe_file(model: WhisperModel, audio_path: Path) -> Dict[str, Any]:
             "text": seg.text,
         })
     return collected
+
+
+def transcribe_batch(model: WhisperModel, audio_paths: List[Path], batch_size: int = 8) -> List[Dict[str, Any]]:
+    """Process multiple audio files in parallel batches on GPU.
+    
+    With 8xH200 GPUs, we can process multiple files simultaneously.
+    Returns results in same order as input paths.
+    """
+    results = []
+    
+    # Process in batches
+    for i in range(0, len(audio_paths), batch_size):
+        batch_paths = audio_paths[i:i + batch_size]
+        batch_results = []
+        
+        # Use ThreadPoolExecutor for parallel GPU inference
+        # Each thread will use the same model but process different audio
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = []
+            for path in batch_paths:
+                futures.append(executor.submit(transcribe_file, model, path))
+        
+            for future in futures:
+                try:
+                    result = future.result(timeout=500)  # 5 min timeout per file
+                    batch_results.append(result)
+                except Exception as e:
+                    print(f"Batch transcription error ({type(e).__name__}): {e}")
+                    traceback.print_exc()
+                    batch_results.append({"segments": [], "error": f"{type(e).__name__}: {e}"})
+        
+        results.extend(batch_results)
+    
+    return results
 
 
 def iter_local_audio(root: Path) -> Iterable[Path]:
@@ -440,7 +506,7 @@ def main() -> None:
         print(f"Downloaded {count} files to {staging_root}")
         return
 
-    # Local-input fast path (no S3 downloads during GPU time)
+    # Local-input fast path with batch processing
     if staging_root and staging_root.exists():
         model = build_model()
         s3, bucket = make_s3_client()
@@ -448,44 +514,67 @@ def main() -> None:
         output_dir.mkdir(exist_ok=True)
 
         audio_paths = list(iter_local_audio(staging_root))
+        if args.max_files:
+            audio_paths = audio_paths[:args.max_files]
+        
+        gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "64"))
         processed = 0
+        
+        # Process in batches
+        batch_buffer = []
         for p in tqdm(audio_paths, desc="Transcribing(local)", unit="file", ncols=80):
-            if args.max_files and processed >= args.max_files:
-                break
             claimed = claim_file(p)
             if not claimed:
                 continue  # taken by another worker
-            try:
-                rel_key_with_suffix = str(claimed.relative_to(staging_root)).replace(os.sep, "/")
-                # strip the trailing .inprogress for key mapping
-                if rel_key_with_suffix.endswith(".inprogress"):
-                    rel_key = rel_key_with_suffix[: -len(".inprogress")]
-                else:
-                    rel_key = rel_key_with_suffix
 
-                result = transcribe_file(model, claimed)
-                plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+            rel_key_with_suffix = str(claimed.relative_to(staging_root)).replace(os.sep, "/")
+            if rel_key_with_suffix.endswith(".inprogress"):
+                rel_key = rel_key_with_suffix[: -len(".inprogress")]
+            else:
+                rel_key = rel_key_with_suffix
 
-                # Save locally
-                out_filename = Path(rel_key).stem + ".txt"
-                out_path = output_dir / out_filename
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(plain_text, encoding="utf-8")
-
-                # Upload to S3 under original relative key's transcript path
-                t_key = transcript_key_for(rel_key)
-                if not transcript_exists(s3, bucket, t_key):
-                    s3.upload_file(str(out_path), bucket, t_key)
-                processed += 1
-            finally:
+            batch_buffer.append((claimed, rel_key))
+            
+            # Process batch when full or at end
+            if len(batch_buffer) >= gpu_batch_size or p == audio_paths[-1]:
+                batch_paths = [item[0] for item in batch_buffer]
+                
                 try:
-                    claimed.unlink()
-                except FileNotFoundError:
-                    pass
+                    # Batch transcribe
+                    results = transcribe_batch(model, batch_paths, batch_size=gpu_batch_size)
+                    
+                    # Process results
+                    for (claimed_path, rel_key), result in zip(batch_buffer, results):
+                        if "error" not in result:
+                            plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+
+                            # Save locally
+                            out_filename = Path(rel_key).stem + ".txt"
+                            out_path = output_dir / out_filename
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(plain_text, encoding="utf-8")
+
+                            # Upload to S3
+                            t_key = transcript_key_for(rel_key)
+                            if not transcript_exists(s3, bucket, t_key):
+                                s3.upload_file(str(out_path), bucket, t_key)
+                            processed += 1
+
+                        try:
+                            claimed_path.unlink()
+                        except FileNotFoundError:
+                            pass
+                except Exception as e:
+                    print(f"Batch error: {e}")
+                    traceback.print_exc()
+                
+                # Clear batch buffer
+                batch_buffer = []
+        
         print(f"\nCompleted transcription for {processed} local file(s).")
         return
 
-    # S3-driven flow with queue-based producer-consumer pattern
+    # S3-driven flow with batch processing
     import queue
     import threading
     
@@ -510,15 +599,18 @@ def main() -> None:
     output_dir = Path("output_speach_to_text")
     output_dir.mkdir(exist_ok=True)
 
+    # Batch size for GPU processing - with 8xH200, we can go aggressive
+    gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "64"))  
+
     # Queue to hold downloaded files ready for transcription
-    download_queue = queue.Queue(maxsize=4)  # Buffer up to 10 files
+    download_queue = queue.Queue(maxsize=gpu_batch_size * 2)  # Buffer 2x batch size
     download_complete = threading.Event()
     processed_count = {"value": 0}
     lock = threading.Lock()
     
     def download_producer():
         """Continuously download files and add to queue"""
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:  # More parallel downloads
             futures = []
             
             def download_single(key):
@@ -549,49 +641,65 @@ def main() -> None:
     download_thread = threading.Thread(target=download_producer, daemon=True)
     download_thread.start()
     
-    # Main thread does transcription
+    # Main thread does batch transcription
     with tqdm(total=len(audio_keys), desc="Transcribing", unit="file", ncols=80) as pbar:
+        batch_buffer = []
+
         while True:
-            try:
-                # Wait for next file, timeout to check if downloads are done
-                key, local_path = download_queue.get(timeout=1.0)
-            except queue.Empty:
-                if download_complete.is_set():
-                    # No more files coming
-                    break
-                continue
-            
-            try:
-                # Transcribe
-                result = transcribe_file(model, local_path)
-                
-                plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
-                output_filename = Path(key).stem + ".txt"
-                output_path = output_dir / output_filename
-                output_path.write_text(plain_text, encoding="utf-8")
-                
-                # Upload transcript
-                transcript_key = transcript_key_for(key)
-                if not transcript_exists(s3, bucket, transcript_key):
-                    s3.upload_file(str(output_path), bucket, transcript_key)
-                
-                with lock:
-                    processed_count["value"] += 1
-                pbar.update(1)
-                
-                # Clean up temp file
+            # Collect files for batch processing
+            while len(batch_buffer) < gpu_batch_size:
                 try:
-                    local_path.unlink()
-                    local_path.parent.rmdir()  # Remove temp dir if empty
-                except:
-                    pass
-                    
-            except Exception as e:
-                print(f"Error processing {key}: {e}")
-                traceback.print_exc()
-    
-    download_thread.join(timeout=5)
-    print(f"\nCompleted transcription for {processed_count['value']} file(s).")
+                    # Short timeout to quickly build batches
+                    key, local_path = download_queue.get(timeout=0.5)
+                    batch_buffer.append((key, local_path))
+                except queue.Empty:
+                    if download_complete.is_set():
+                        break  # Process remaining batch
+                    continue
+
+            # Process batch if we have files
+            if batch_buffer:
+                batch_keys = [item[0] for item in batch_buffer]
+                batch_paths = [item[1] for item in batch_buffer]
+
+                try:
+                    # Batch transcribe on GPU
+                    results = transcribe_batch(model, batch_paths, batch_size=gpu_batch_size)
+
+                    # Process results and upload
+                    for (key, local_path), result in zip(batch_buffer, results):
+                        if "error" not in result:
+                            plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+                            output_filename = Path(key).stem + ".txt"
+                            output_path = output_dir / output_filename
+                            output_path.write_text(plain_text, encoding="utf-8")
+
+                            # Upload transcript
+                            transcript_key = transcript_key_for(key)
+                            if not transcript_exists(s3, bucket, transcript_key):
+                                s3.upload_file(str(output_path), bucket, transcript_key)
+
+                            with lock:
+                                processed_count["value"] += 1
+                            pbar.update(1)
+
+                        # Clean up temp file
+                        try:
+                            local_path.unlink()
+                            local_path.parent.rmdir()  # Remove temp dir if empty
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    print(f"Batch processing error: {e}")
+                    traceback.print_exc()
+
+                # Clear batch buffer
+                batch_buffer = []
+
+            # Check if we're done
+            if download_complete.is_set() and not batch_buffer:
+                break
 
 
 if __name__ == "__main__":

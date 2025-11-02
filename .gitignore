@@ -13,3 +13,5 @@ SSL_redis-redis-epic-wing.pem
 redis-queue-setup.md
 
 cache/
+deploy-test.sh
+performance-gains-log
