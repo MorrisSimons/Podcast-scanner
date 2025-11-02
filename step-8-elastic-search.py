@@ -80,12 +80,39 @@ def main() -> None:
         print(f"Keyword '{args.keyword}' not found in index '{args.index}'")
         return
 
-    print(f"Keyword '{args.keyword}' found in {len(hits)} documents:")
-    for hit in hits:
+    print(f"Keyword '{args.keyword}' found in {len(hits)} documents:\n")
+    for idx, hit in enumerate(hits, 1):
         source = hit.get("_source", {})
         score = hit.get("_score", 0.0)
-        path = source.get("path", "<unknown>")
-        print(f" - {path} (score={score:.2f})")
+        
+        episode_id = source.get("episode_id", "N/A")
+        episode_title = source.get("episode_title", "N/A")
+        podcast_title = source.get("podcast_title", "N/A")
+        podcast_author = source.get("podcast_author", "N/A")
+        podcast_image = source.get("podcast_image_url", "N/A")
+        pub_date = source.get("episode_pub_date", "N/A")
+        duration = source.get("episode_duration_seconds", 0)
+        content = source.get("content", "")
+        
+        print(f"[{idx}] Episode: {episode_title}")
+        print(f"    Podcast: {podcast_title}")
+        if podcast_author and podcast_author != "N/A":
+            print(f"    Author: {podcast_author}")
+        if podcast_image and podcast_image != "N/A":
+            print(f"    Image: {podcast_image}")
+        print(f"    Published: {pub_date}")
+        if duration:
+            print(f"    Duration: {duration // 60}m {duration % 60}s")
+        print(f"    Episode ID: {episode_id}")
+        print(f"    Score: {score:.2f}")
+        
+        if content:
+            content_snippet = content[:300].replace("\n", " ")
+            if len(content) > 300:
+                content_snippet += "..."
+            print(f"    Content: {content_snippet}")
+        
+        print()
 
 
 if __name__ == "__main__":
