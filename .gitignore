@@ -11,3 +11,5 @@ k8s/
 
 SSL_redis-redis-epic-wing.pem
 redis-queue-setup.md
+
+cache/

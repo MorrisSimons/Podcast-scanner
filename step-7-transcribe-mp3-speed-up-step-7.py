@@ -4,6 +4,7 @@ import argparse
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 from faster_whisper import WhisperModel
@@ -275,6 +276,7 @@ def redis_worker_loop() -> None:
                             ok = process_message(r, s3, bucket, model, cache_root, (stream, msg_id, fields), consumer, lock_ttl_sec)
                             if ok:
                                 r.xack(stream, group, msg_id)
+                                r.incr("podcast:processed_count")
                         except ClientError as e:
                             print(f"S3 error for reclaimed {msg_id}: {e}")
                             traceback.print_exc()
@@ -296,6 +298,7 @@ def redis_worker_loop() -> None:
                         ok = process_message(r, s3, bucket, model, cache_root, (_stream, msg_id, fields), consumer, lock_ttl_sec)
                         if ok:
                             r.xack(stream, group, msg_id)
+                            r.incr("podcast:processed_count")
                     except ClientError as e:
                         print(f"S3 error for {msg_id}: {e}")
                         traceback.print_exc()
@@ -482,7 +485,10 @@ def main() -> None:
         print(f"\nCompleted transcription for {processed} local file(s).")
         return
 
-    # Fallback: original S3-driven flow (GPU may idle on S3)
+    # S3-driven flow with queue-based producer-consumer pattern
+    import queue
+    import threading
+    
     s3, bucket = make_s3_client()
     s3_prefix = os.getenv("S3_PREFIX")
     audio_keys = list_audio_keys(s3, bucket, s3_prefix)
@@ -504,29 +510,88 @@ def main() -> None:
     output_dir = Path("output_speach_to_text")
     output_dir.mkdir(exist_ok=True)
 
-    processed = 0
-    for key in tqdm(audio_keys, desc="Transcribing(S3)", unit="file", ncols=80):
-        tqdm.write(f"[download] s3://{bucket}/{key}", file=sys.stderr)
-        local_path = download_from_s3(s3, bucket, key)
-
-        tqdm.write(f"[transcribe] {local_path.name} …", file=sys.stderr)
-        result = transcribe_file(model, local_path)
-
-        plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
-        output_filename = Path(key).stem + ".txt"
-        output_path = output_dir / output_filename
-        output_path.write_text(plain_text, encoding="utf-8")
-        tqdm.write(f"[saved] {output_path}", file=sys.stderr)
-
-        transcript_key = transcript_key_for(key)
-        if not transcript_exists(s3, bucket, transcript_key):
-            s3.upload_file(str(output_path), bucket, transcript_key)
-            tqdm.write(f"[uploaded] s3://{bucket}/{transcript_key}", file=sys.stderr)
-        else:
-            tqdm.write(f"[skip exists] s3://{bucket}/{transcript_key}", file=sys.stderr)
-        processed += 1
-
-    print(f"\nCompleted transcription for {processed} file(s).")
+    # Queue to hold downloaded files ready for transcription
+    download_queue = queue.Queue(maxsize=4)  # Buffer up to 10 files
+    download_complete = threading.Event()
+    processed_count = {"value": 0}
+    lock = threading.Lock()
+    
+    def download_producer():
+        """Continuously download files and add to queue"""
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            
+            def download_single(key):
+                try:
+                    s3_worker, _ = make_s3_client()
+                    local_path = download_from_s3(s3_worker, bucket, key)
+                    return key, local_path
+                except Exception as e:
+                    print(f"Download error for {key}: {e}")
+                    return key, None
+            
+            # Submit all downloads
+            for key in audio_keys:
+                futures.append(executor.submit(download_single, key))
+            
+            # As downloads complete, add to queue
+            for future in as_completed(futures):
+                try:
+                    key, local_path = future.result()
+                    if local_path:
+                        download_queue.put((key, local_path))
+                except Exception as e:
+                    print(f"Error getting download result: {e}")
+        
+        download_complete.set()
+    
+    # Start download thread
+    download_thread = threading.Thread(target=download_producer, daemon=True)
+    download_thread.start()
+    
+    # Main thread does transcription
+    with tqdm(total=len(audio_keys), desc="Transcribing", unit="file", ncols=80) as pbar:
+        while True:
+            try:
+                # Wait for next file, timeout to check if downloads are done
+                key, local_path = download_queue.get(timeout=1.0)
+            except queue.Empty:
+                if download_complete.is_set():
+                    # No more files coming
+                    break
+                continue
+            
+            try:
+                # Transcribe
+                result = transcribe_file(model, local_path)
+                
+                plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+                output_filename = Path(key).stem + ".txt"
+                output_path = output_dir / output_filename
+                output_path.write_text(plain_text, encoding="utf-8")
+                
+                # Upload transcript
+                transcript_key = transcript_key_for(key)
+                if not transcript_exists(s3, bucket, transcript_key):
+                    s3.upload_file(str(output_path), bucket, transcript_key)
+                
+                with lock:
+                    processed_count["value"] += 1
+                pbar.update(1)
+                
+                # Clean up temp file
+                try:
+                    local_path.unlink()
+                    local_path.parent.rmdir()  # Remove temp dir if empty
+                except:
+                    pass
+                    
+            except Exception as e:
+                print(f"Error processing {key}: {e}")
+                traceback.print_exc()
+    
+    download_thread.join(timeout=5)
+    print(f"\nCompleted transcription for {processed_count['value']} file(s).")
 
 
 if __name__ == "__main__":
