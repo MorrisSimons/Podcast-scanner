@@ -24,7 +24,7 @@ def main():
     print(f"Initial count: {initial_count:,} files\n")
     
     print("Waiting 120 seconds...")
-    time.sleep(120)
+    time.sleep(300)
     
     print("\nGetting final txt file count...")
     final_count = run_s3_counter()

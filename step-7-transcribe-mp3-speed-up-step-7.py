@@ -11,6 +11,7 @@ import boto3
 from faster_whisper import WhisperModel
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+import re
 from tqdm import tqdm
 import json
 import time
@@ -26,6 +27,43 @@ except Exception as _e:
     ResponseError = Exception  # fallback typing
 
 load_dotenv()
+
+
+# Optional Elasticsearch globals (initialized in worker if configured)
+ES_CLIENT: Optional[object] = None
+ES_INDEX: Optional[str] = None
+TOKEN_PATTERN = re.compile(r"\b\w+\b")
+
+def make_es_client() -> Tuple[Optional[object], Optional[str]]:
+    endpoint = os.getenv("ELASTICSEARCH_ENDPOINT")
+    index = os.getenv("ELASTICSEARCH_INDEX")
+    api_key = os.getenv("ELASTICSEARCH_APIKEY")
+    if not endpoint or not index:
+        return None, None
+    try:
+        # Lazy import to avoid hard dependency when ES is not used
+        from elasticsearch import Elasticsearch  # type: ignore
+    except Exception as e:
+        print(f"Elasticsearch client not available: {e}")
+        return None, None
+    try:
+        client = Elasticsearch(hosts=[endpoint], api_key=api_key) if api_key else Elasticsearch(hosts=[endpoint])
+        try:
+            if not client.ping():
+                print(f"Warning: Elasticsearch at {endpoint} did not respond to ping")
+        except Exception:
+            # Non-fatal; continue and let index calls surface errors
+            pass
+        # Best-effort ensure index exists (no-op if present)
+        try:
+            if not client.indices.exists(index=index):  # type: ignore[attr-defined]
+                client.indices.create(index=index)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return client, index
+    except Exception as e:
+        print(f"Failed to initialize Elasticsearch client: {e}")
+        return None, None
 
 
 def make_s3_client():
@@ -214,6 +252,20 @@ def process_message(r, s3, bucket: str, model: WhisperModel, cache_root: Path, m
         paths["out"].write_text(plain_text, encoding="utf-8")
         if not transcript_exists(s3, bucket, t_key):
             s3.upload_file(str(paths["out"]), bucket, t_key)
+
+        # Optional: index transcript into Elasticsearch
+        try:
+            if ES_CLIENT and ES_INDEX:
+                doc_id = Path(key).stem
+                unique_keywords = sorted({m.group(0) for m in TOKEN_PATTERN.finditer(plain_text.lower())})
+                ES_CLIENT.index(index=ES_INDEX, id=doc_id, document={
+                    "id": doc_id,
+                    "s3_key": key,
+                    "content": plain_text,
+                    "unique_keywords": unique_keywords,
+                })
+        except Exception as es_err:
+            print(f"Elasticsearch index error for {key}: {es_err}")
         return True
     finally:
         try:
@@ -237,12 +289,23 @@ def redis_worker_loop() -> None:
     # Build model once per pod, cache weights under cache_root/model
     model = build_model(cache_dir=str(cache_root / "model"))
 
+    # Initialize optional Elasticsearch client
+    global ES_CLIENT, ES_INDEX
+    try:
+        ES_CLIENT, ES_INDEX = make_es_client()
+        if ES_CLIENT and ES_INDEX:
+            print(f"Elasticsearch indexing enabled for index: {ES_INDEX}")
+        else:
+            print("Elasticsearch indexing disabled (missing config)")
+    except Exception as es_init_err:
+        print(f"Elasticsearch init error: {es_init_err}")
+
     consumer = f"{socket.gethostname()}-{os.getpid()}"
     stream = "podcast:queue"
     group = "workers"
 
     # Batch size controls how many jobs we pull per GPU inference cycle
-    gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "16"))
+    gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "32"))
     # DOWNLOAD_WORKERS sets how many threads we devote to prefetching audio
     download_workers = int(os.getenv("DOWNLOAD_WORKERS", "4"))
 
@@ -377,6 +440,20 @@ def redis_worker_loop() -> None:
 
                                     if not transcript_exists(s3, bucket, entry["t_key"]):
                                         s3.upload_file(str(entry["paths"]["out"]), bucket, entry["t_key"])
+
+                                    # Optional: index transcript into Elasticsearch
+                                    try:
+                                        if ES_CLIENT and ES_INDEX:
+                                            doc_id = Path(entry["key"]).stem
+                                            unique_keywords = sorted({m.group(0) for m in TOKEN_PATTERN.finditer(plain_text.lower())})
+                                            ES_CLIENT.index(index=ES_INDEX, id=doc_id, document={
+                                                "id": doc_id,
+                                                "s3_key": entry["key"],
+                                                "content": plain_text,
+                                                "unique_keywords": unique_keywords,
+                                            })
+                                    except Exception as es_err:
+                                        print(f"Elasticsearch index error for {entry['key']}: {es_err}")
 
                                     r.xack(stream, group, entry["msg_id"])
                                     r.incr("podcast:processed_count")
