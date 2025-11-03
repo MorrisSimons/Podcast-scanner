@@ -535,48 +535,6 @@ def main() -> None:
         print(f"Scanned {total} keys, enqueued {enq} missing transcripts to {stream_name}")
         return
 
-    # Determine staging root (download target or local input dir)
-    staging_root: Optional[Path] = None
-    if args.staging_dir:
-        staging_root = Path(args.staging_dir).resolve()
-    elif os.getenv("LOCAL_INPUT_DIR"):
-        staging_root = Path(os.getenv("LOCAL_INPUT_DIR")).resolve()
-
-    if args.download_only:
-        if not staging_root:
-            raise ValueError("--staging-dir or LOCAL_INPUT_DIR is required for --download-only")
-        staging_root.mkdir(parents=True, exist_ok=True)
-
-        s3, bucket = make_s3_client()
-        s3_prefix = os.getenv("S3_PREFIX")
-        print("listing audio keys")
-        all_keys = list_audio_keys(s3, bucket, s3_prefix)
-        print("listing audio keys complete")
-        print("checking if transcript exists")
-        keys = [k for k in all_keys if not transcript_exists(s3, bucket, transcript_key_for(k))]
-        print("checking if transcript exists complete")
-        if not keys:
-            print("Nothing to download (all transcripts exist).")
-            return
-        print("downloading files")
-        count = 0
-        for key in tqdm(keys, desc="Downloading", unit="file", ncols=80):
-            dest = staging_root / key
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                continue
-            s3.download_file(bucket, key, str(dest))
-            count += 1
-            if args.max_files and count >= args.max_files:
-                break
-        print(f"Downloaded {count} files to {staging_root}")
-        return
-
-    print("No explicit mode selected; starting Redis worker by default")
-    print("starting redis worker loop")
-    redis_worker_loop()
-    print("redis worker loop complete")
-
 
 if __name__ == "__main__":
     try:
