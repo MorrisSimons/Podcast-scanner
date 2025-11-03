@@ -29,43 +29,6 @@ except Exception as _e:
 load_dotenv()
 
 
-# Optional Elasticsearch globals (initialized in worker if configured)
-ES_CLIENT: Optional[object] = None
-ES_INDEX: Optional[str] = None
-TOKEN_PATTERN = re.compile(r"\b\w+\b")
-
-def make_es_client() -> Tuple[Optional[object], Optional[str]]:
-    endpoint = os.getenv("ELASTICSEARCH_ENDPOINT")
-    index = os.getenv("ELASTICSEARCH_INDEX")
-    api_key = os.getenv("ELASTICSEARCH_APIKEY")
-    if not endpoint or not index:
-        return None, None
-    try:
-        # Lazy import to avoid hard dependency when ES is not used
-        from elasticsearch import Elasticsearch  # type: ignore
-    except Exception as e:
-        print(f"Elasticsearch client not available: {e}")
-        return None, None
-    try:
-        client = Elasticsearch(hosts=[endpoint], api_key=api_key) if api_key else Elasticsearch(hosts=[endpoint])
-        try:
-            if not client.ping():
-                print(f"Warning: Elasticsearch at {endpoint} did not respond to ping")
-        except Exception:
-            # Non-fatal; continue and let index calls surface errors
-            pass
-        # Best-effort ensure index exists (no-op if present)
-        try:
-            if not client.indices.exists(index=index):  # type: ignore[attr-defined]
-                client.indices.create(index=index)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        return client, index
-    except Exception as e:
-        print(f"Failed to initialize Elasticsearch client: {e}")
-        return None, None
-
-
 def make_s3_client():
     s3 = boto3.session.Session().client(
         service_name="s3",
@@ -147,13 +110,6 @@ def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
         compute_type=compute_type,
         download_root=cache_dir,
     )
-
-
-def _get_env(name: str, default: Optional[str] = None) -> str:
-    value = os.getenv(name, default)
-    if value is None:
-        raise ValueError(f"Missing required environment variable: {name}")
-    return value
 
 
 def make_redis_client():
@@ -253,19 +209,6 @@ def process_message(r, s3, bucket: str, model: WhisperModel, cache_root: Path, m
         if not transcript_exists(s3, bucket, t_key):
             s3.upload_file(str(paths["out"]), bucket, t_key)
 
-        # Optional: index transcript into Elasticsearch
-        try:
-            if ES_CLIENT and ES_INDEX:
-                doc_id = Path(key).stem
-                unique_keywords = sorted({m.group(0) for m in TOKEN_PATTERN.finditer(plain_text.lower())})
-                ES_CLIENT.index(index=ES_INDEX, id=doc_id, document={
-                    "id": doc_id,
-                    "s3_key": key,
-                    "content": plain_text,
-                    "unique_keywords": unique_keywords,
-                })
-        except Exception as es_err:
-            print(f"Elasticsearch index error for {key}: {es_err}")
         return True
     finally:
         try:
@@ -288,17 +231,6 @@ def redis_worker_loop() -> None:
 
     # Build model once per pod, cache weights under cache_root/model
     model = build_model(cache_dir=str(cache_root / "model"))
-
-    # Initialize optional Elasticsearch client
-    global ES_CLIENT, ES_INDEX
-    try:
-        ES_CLIENT, ES_INDEX = make_es_client()
-        if ES_CLIENT and ES_INDEX:
-            print(f"Elasticsearch indexing enabled for index: {ES_INDEX}")
-        else:
-            print("Elasticsearch indexing disabled (missing config)")
-    except Exception as es_init_err:
-        print(f"Elasticsearch init error: {es_init_err}")
 
     consumer = f"{socket.gethostname()}-{os.getpid()}"
     stream = "podcast:queue"
@@ -441,20 +373,6 @@ def redis_worker_loop() -> None:
                                     if not transcript_exists(s3, bucket, entry["t_key"]):
                                         s3.upload_file(str(entry["paths"]["out"]), bucket, entry["t_key"])
 
-                                    # Optional: index transcript into Elasticsearch
-                                    try:
-                                        if ES_CLIENT and ES_INDEX:
-                                            doc_id = Path(entry["key"]).stem
-                                            unique_keywords = sorted({m.group(0) for m in TOKEN_PATTERN.finditer(plain_text.lower())})
-                                            ES_CLIENT.index(index=ES_INDEX, id=doc_id, document={
-                                                "id": doc_id,
-                                                "s3_key": entry["key"],
-                                                "content": plain_text,
-                                                "unique_keywords": unique_keywords,
-                                            })
-                                    except Exception as es_err:
-                                        print(f"Elasticsearch index error for {entry['key']}: {es_err}")
-
                                     r.xack(stream, group, entry["msg_id"])
                                     r.incr("podcast:processed_count")
                                     print(f"Transcribed and uploaded transcript for {entry['key']}")
@@ -582,8 +500,8 @@ def main() -> None:
     if args.redis_worker:
         redis_worker_loop()
         return
-
-    if args.enqueue_missing:
+    # ! This is the producer mode we use to enqueue transcripts to 
+    if args.enqueue_missing: # this is the mode we use to enqueue missing transcripts
         # Producer mode: scan S3, dedupe, enqueue only missing transcripts
         s3, bucket = make_s3_client()
         r = make_redis_client()
@@ -606,7 +524,7 @@ def main() -> None:
             # Redis-side de-dup window; prevents enqueueing the same key repeatedly
             dedup_key = f"queue:dedup:{key}"
             try:
-                dedup_ok = r.set(dedup_key, "1", nx=True, ex=24 * 3600)
+                dedup_ok = r.set(dedup_key, "1", nx=True)
             except Exception as e:
                 print(f"Producer dedup SET failed for {dedup_key}: {e}")
                 traceback.print_exc()
