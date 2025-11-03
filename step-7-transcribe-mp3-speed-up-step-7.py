@@ -19,12 +19,8 @@ import socket
 from datetime import timedelta
 import traceback
 
-try:
-    import redis  # type: ignore
-    from redis.exceptions import ResponseError  # type: ignore
-except Exception as _e:
-    redis = None  # lazily validated when --redis-worker is used
-    ResponseError = Exception  # fallback typing
+import redis
+from redis.exceptions import ResponseError
 
 load_dotenv()
 
@@ -113,8 +109,6 @@ def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
 
 
 def make_redis_client():
-    if redis is None:
-        raise RuntimeError("redis-py is not installed; install 'redis' package to use --redis-worker")
     url = _get_env("REDIS_URL")
     # Allow redis-py to parse rediss:// and attach CA
     ca = os.getenv("REDIS_TLS_CA_FILE")
@@ -484,9 +478,6 @@ def transcribe_batch(model: WhisperModel, audio_paths: List[Path], batch_size: i
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe podcasts via Redis worker (default) or helper modes")
-    parser.add_argument("--download-only", action="store_true", help="Only download audio from S3 to staging dir")
-    parser.add_argument("--staging-dir", type=str, help="Directory for staging (download or local input)")
-    parser.add_argument("--max-files", type=int, default=0, help="Limit number of files to process (0 = unlimited)")
     parser.add_argument("--enqueue-missing", action="store_true", help="Producer: enqueue S3 audio keys missing transcripts")
     parser.add_argument("--redis-stream", type=str, default="podcast:queue", help="Redis stream name (default: podcast:queue)")
     parser.add_argument("--redis-worker", action="store_true", help="Run as Redis stream consumer worker")
