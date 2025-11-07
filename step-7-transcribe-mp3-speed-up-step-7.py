@@ -202,7 +202,7 @@ def process_message(r, s3, bucket: str, model: WhisperModel, cache_root: Path, m
         _download_if_needed(s3, bucket, key, paths["audio"])
 
         result = transcribe_file(model, paths["audio"])  # returns segments
-        plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+        plain_text = format_transcript_with_timestamps(result["segments"])
 
         paths["out"].write_text(plain_text, encoding="utf-8")
         if not transcript_exists(s3, bucket, t_key):
@@ -393,7 +393,7 @@ def redis_worker_loop() -> None:
                             for entry, result in zip(batch, results):
                                 try:
                                     if "error" not in result:
-                                        plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+                                        plain_text = format_transcript_with_timestamps(result["segments"])
                                         entry["paths"]["out"].write_text(plain_text, encoding="utf-8")
 
                                         if not transcript_exists(s3, bucket, entry["t_key"]):
@@ -457,13 +457,24 @@ def redis_worker_loop() -> None:
             time.sleep(1.0)
 
 
+def format_transcript_with_timestamps(segments: List[Dict[str, Any]]) -> str:
+    """Format transcript segments with timestamps in [start -> end] format."""
+    lines = []
+    for seg in segments:
+        start = seg["start"]
+        end = seg["end"]
+        text = seg["text"].strip()
+        lines.append(f"[{start:.2f} -> {end:.2f}] {text}")
+    return "\n".join(lines)
+
+
 def transcribe_file(model: WhisperModel, audio_path: Path) -> Dict[str, Any]:
     segments, info = model.transcribe(
         str(audio_path),
         language="sv",
         task="transcribe",
         vad_filter=True,
-        beam_size=0,
+        beam_size=1,
         temperature=0.0,
         condition_on_previous_text=False,
     )
