@@ -23,8 +23,8 @@ def main():
     initial_count = run_s3_counter()
     print(f"Initial count: {initial_count:,} files\n")
     
-    print("Waiting 5 minutes...")
-    time.sleep(300)
+    print("Waiting 15 minutes...")
+    time.sleep(900)
     
     print("\nGetting final txt file count...")
     final_count = run_s3_counter()
