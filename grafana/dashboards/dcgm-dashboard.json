@@ -1,0 +1,8 @@
+{
+  "source": "grafana.com",
+  "dashboardId": 12239,
+  "revision": 5,
+  "title": "NVIDIA DCGM Exporter Dashboard",
+  "notes": "Import via Grafana UI, set Prometheus data source to kube-prometheus-stack"
+}
+

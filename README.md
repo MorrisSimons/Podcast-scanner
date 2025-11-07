@@ -222,12 +222,16 @@ Okay so here is how i did, I wanted to start with high quality, using beam 8 on 
 - I choose an Faster **from faster_whisper import WhisperModel**. It is the fastest of all the option in the KB-whispermodels in terms of infrance.
 - Since im using a smaller model and they can be runned on just 1 H200 GPU, Why do this; from what i understood is that doing this will leed to less overhead in terms of communications and splitting works amoung multiple GPUs. I did this by adding a redis queue.
 - The next speedup thing i did was to do the download first and then have a thread downloading more files while transcribing at the sametime. This way we could make sure we have a higher GPU utilization.
-- 
+- Another speedup thing i did was to batch multiple audio files and then run it at the sametime on GPU becuase i have alot of VRAM on my GPUs we should utilize that. 
+
+From this it seemed that we had an high utilization of our gpu for the mostpart but it was not enough so for the next part i started to use an
+- kb-whisper-medium
+- I also lowerd Beamsize to 0.
 
 
 DO SOME comments here
 
-
+```
 def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
     compute_type = os.getenv("COMPUTE_TYPE", "float16")
     device_index = int(os.getenv("CUDA_DEVICE_INDEX", "0"))
@@ -238,6 +242,11 @@ def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
         compute_type=compute_type,
         download_root="cache",
     )
+```
+
+
+Segments
+
 
 ```
 
@@ -252,6 +261,4 @@ def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
 
 ```
 
-Redis my thinking behind that.
-
-also discovery of that you cant do an async download you need
+11-12

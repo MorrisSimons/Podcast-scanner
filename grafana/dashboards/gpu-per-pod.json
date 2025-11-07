@@ -1,0 +1,185 @@
+{
+  "title": "GPU Per Pod Overview",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "GPU Utilization (%)",
+      "id": 1,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL{kubernetes_pod=~\"$pod\", kubernetes_node=~\"$node\"}",
+          "legendFormat": "{{kubernetes_node}}/{{kubernetes_pod}} (GPU {{gpu}})",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU Memory Used (%)",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "(DCGM_FI_DEV_FB_USED{kubernetes_pod=~\"$pod\", kubernetes_node=~\"$node\"} / DCGM_FI_DEV_FB_TOTAL{kubernetes_pod=~\"$pod\", kubernetes_node=~\"$node\"}) * 100",
+          "legendFormat": "{{kubernetes_node}}/{{kubernetes_pod}} (GPU {{gpu}})",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Pod -> GPU Mapping",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max by (kubernetes_node, kubernetes_pod, gpu)(DCGM_FI_DEV_GPU_UTIL{kubernetes_pod!=''})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "columns": [
+              {
+                "index": 0,
+                "rename": "GPU Utilization"
+              },
+              {
+                "index": 1,
+                "rename": "GPU"
+              },
+              {
+                "index": 2,
+                "rename": "Pod"
+              },
+              {
+                "index": 3,
+                "rename": "Node"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(DCGM_FI_DEV_GPU_UTIL, kubernetes_node)",
+        "refresh": 2
+      },
+      {
+        "name": "pod",
+        "label": "Pod",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(DCGM_FI_DEV_GPU_UTIL{kubernetes_node=\"$node\"}, kubernetes_pod)",
+        "refresh": 2
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  }
+}
+
