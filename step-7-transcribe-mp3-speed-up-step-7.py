@@ -24,8 +24,11 @@ from redis.exceptions import ResponseError
 
 load_dotenv()
 
+print("SCRIPT: Imports completed")
+
 
 def make_s3_client():
+    print("DEBUG: make_s3_client() called")
     s3 = boto3.session.Session().client(
         service_name="s3",
         region_name=os.getenv("S3_REGION"),
@@ -41,6 +44,7 @@ def make_s3_client():
     print(f"S3_SECRET_ACCESS_KEY: {os.getenv('S3_SECRET_ACCESS_KEY')}")
     if not bucket:
         raise ValueError("S3_BUCKET is required")
+    print("DEBUG: make_s3_client() returning")
     return s3, bucket
 
 
@@ -96,20 +100,21 @@ def transcript_exists(s3, bucket: str, transcript_key: str) -> bool:
 
 
 def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
-    device = "cuda"  # node is GPU; fail fast if CUDA unavailable
     compute_type = os.getenv("COMPUTE_TYPE", "float16")
     device_index = int(os.getenv("CUDA_DEVICE_INDEX", "0"))
     return WhisperModel(
-        "KBLab/kb-whisper-large",
-        device=device,
+        "KBLab/kb-whisper-medium",
+        device="cuda",
         device_index=device_index,
         compute_type=compute_type,
-        download_root=cache_dir,
+        download_root="cache",
     )
 
-
 def make_redis_client():
-    url = _get_env("REDIS_URL")
+    print("DEBUG: make_redis_client() called")
+    url = os.getenv("REDIS_URL")
+    if not url:
+        raise ValueError("REDIS_URL environment variable is required")
     # Allow redis-py to parse rediss:// and attach CA
     ca = os.getenv("REDIS_TLS_CA_FILE")
     kwargs: Dict[str, Any] = {}
@@ -213,34 +218,43 @@ def process_message(r, s3, bucket: str, model: WhisperModel, cache_root: Path, m
 
 
 def redis_worker_loop() -> None:
+    print("WORKER: Entering redis_worker_loop")
     # Setup clients and cache/model
     r = make_redis_client()
+    print("WORKER: Redis client created")
     s3, bucket = make_s3_client()
+    print("WORKER: S3 client created")
     # Cache root keeps downloaded audio/model weights persistent across batches
     cache_root = Path(os.getenv("CACHE_DIR", "/cache")).resolve()
     _safe_mkdir(cache_root)
 
     # Ensure the Redis consumer group exists so we can xreadgroup without errors
+    print("WORKER: Ensuring stream group")
     ensure_stream_group(r, "podcast:queue", "workers")
+    print("WORKER: Stream group ready")
 
     # Build model once per pod, cache weights under cache_root/model
+    print("WORKER: Building model (this may take a while)...")
     model = build_model(cache_dir=str(cache_root / "model"))
+    print("WORKER: Model loaded")
 
     consumer = f"{socket.gethostname()}-{os.getpid()}"
     stream = "podcast:queue"
     group = "workers"
 
     # Batch size controls how many jobs we pull per GPU inference cycle
-    gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "32"))
+    gpu_batch_size = int(os.getenv("GPU_BATCH_SIZE", "16"))
     # DOWNLOAD_WORKERS sets how many threads we devote to prefetching audio
     download_workers = int(os.getenv("DOWNLOAD_WORKERS", "4"))
+    prefetch_multiplier = int(os.getenv("PREFETCH_MULTIPLIER", "2"))
+    prefetch_count = max(gpu_batch_size, gpu_batch_size * prefetch_multiplier)
 
     lock_ttl_sec = int(os.getenv("TRANSCRIBE_LOCK_TTL_SEC", str(int(timedelta(hours=6).total_seconds()))))
 
-    while True:
+    while True: #? We could probably make this a bit better, i can see some drop in utalization time of the GPU.
         try:
-            # Read multiple messages at once for batch processing
-            msgs = r.xreadgroup(groupname=group, consumername=consumer, streams={stream: ">"}, count=gpu_batch_size, block=5000)
+            # Read multiple messages at once for batch processing (prefetch window keeps GPU fed)
+            msgs = r.xreadgroup(groupname=group, consumername=consumer, streams={stream: ">"}, count=prefetch_count, block=5000)
             if not msgs:
                 continue
             
@@ -260,12 +274,6 @@ def redis_worker_loop() -> None:
                     try:
                         key = _extract_key_from_message(fields)
                         t_key = transcript_key_for(key)
-                        
-                        # Skip if transcript exists
-                        if transcript_exists(s3, bucket, t_key):
-                            r.xack(stream, group, msg_id)
-                            print(f"Skipping {key}: transcript already exists")
-                            continue
                         
                         # Try to get lock
                         lock_key = f"lock:transcribe:{t_key}"
@@ -323,73 +331,105 @@ def redis_worker_loop() -> None:
                             download_complete.set()
 
                         threading.Thread(target=download_producer, daemon=True).start()
-                        print("Download producer thread started")
+                        print(f"Download producer thread started (prefetch_count={prefetch_count})")
 
                         downloaded_entries: List[Optional[Dict[str, Any]]] = [None] * len(valid_messages)
-                        received = 0
-                        while received < len(valid_messages):
+                        ready_entries: List[Dict[str, Any]] = []
+
+                        def record_entry(item_index: int, entry: Dict[str, Any]) -> None:
+                            downloaded_entries[item_index] = entry
+                            if entry and "download_error" not in entry:
+                                ready_entries.append(entry)
+
+                        # Prime the ready buffer with completed downloads
+                        while len(ready_entries) < gpu_batch_size and not download_complete.is_set():
                             try:
                                 item_index, entry = download_queue.get(timeout=0.5)
+                                record_entry(item_index, entry)
                             except queue.Empty:
-                                if download_complete.is_set():
-                                    break
-                                continue
-                            downloaded_entries[item_index] = entry
-                            received += 1
-                            if entry and "download_error" not in entry:
-                                print(f"Queued {entry['key']} for GPU batch")
+                                pass
 
+                        # Drain any additional finished downloads without blocking
                         while not download_queue.empty():
-                            item_index, entry = download_queue.get()
-                            if downloaded_entries[item_index] is None:
-                                downloaded_entries[item_index] = entry
-                                received += 1
+                            try:
+                                item_index, entry = download_queue.get_nowait()
+                                record_entry(item_index, entry)
+                            except queue.Empty:
+                                break
 
-                        completed_count = sum(1 for entry in downloaded_entries if entry and "download_error" not in entry)
-                        print(f"Downloads complete: {completed_count}/{len(valid_messages)} ready for transcription")
-                        processed_entries = [entry for entry in downloaded_entries if entry and "download_error" not in entry]
-                        if not processed_entries:
-                            # Nothing successfully downloaded; try again next loop
+                        if not ready_entries and download_complete.is_set():
                             print("No entries ready after download stage; retrying next loop")
+                            for entry in downloaded_entries:
+                                if entry and "download_error" in entry:
+                                    print(f"Download error for {entry['key']}: {entry['download_error']}")
+                                    try:
+                                        r.delete(entry["lock_key"])
+                                    except Exception:
+                                        pass
                             continue
 
-                        batch_paths = [entry["paths"]["audio"] for entry in processed_entries]
-                        print(f"Submitting batch of {len(batch_paths)} file(s) to transcribe")
-                        results = transcribe_batch(model, batch_paths, batch_size=gpu_batch_size)
-
-                        # Process results
-                        for entry, result in zip(processed_entries, results):
-                            try:
-                                if "error" not in result:
-                                    plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
-                                    entry["paths"]["out"].write_text(plain_text, encoding="utf-8")
-
-                                    if not transcript_exists(s3, bucket, entry["t_key"]):
-                                        s3.upload_file(str(entry["paths"]["out"]), bucket, entry["t_key"])
-
-                                    r.xack(stream, group, entry["msg_id"])
-                                    r.incr("podcast:processed_count")
-                                    print(f"Transcribed and uploaded transcript for {entry['key']}")
-                                else:
-                                    # Keep the lock cleanup consistent even on model errors
-                                    print(f"Batch result for {entry['t_key']} failed: {result.get('error')}")
-                            finally:
+                        batch_num = 0
+                        while ready_entries or not download_complete.is_set():
+                            if not ready_entries:
                                 try:
-                                    r.delete(entry["lock_key"])
-                                except Exception:
-                                    pass
+                                    item_index, entry = download_queue.get(timeout=0.5)
+                                    record_entry(item_index, entry)
+                                    continue
+                                except queue.Empty:
+                                    if download_complete.is_set():
+                                        break
+                                    continue
+
+                            batch = ready_entries[:gpu_batch_size]
+                            ready_entries = ready_entries[len(batch):]
+
+                            batch_num += 1
+                            batch_paths = [entry["paths"]["audio"] for entry in batch]
+                            print(f"Submitting batch #{batch_num} of {len(batch_paths)} file(s) to transcribe (overlapping with remaining downloads)")
+
+                            results = transcribe_batch(model, batch_paths, batch_size=gpu_batch_size)
+
+                            # Process results
+                            for entry, result in zip(batch, results):
+                                try:
+                                    if "error" not in result:
+                                        plain_text = "\n".join(seg["text"].strip() for seg in result["segments"])
+                                        entry["paths"]["out"].write_text(plain_text, encoding="utf-8")
+
+                                        if not transcript_exists(s3, bucket, entry["t_key"]):
+                                            s3.upload_file(str(entry["paths"]["out"]), bucket, entry["t_key"])
+
+                                        r.xack(stream, group, entry["msg_id"])
+                                        r.incr("podcast:processed_count")
+                                        print(f"Transcribed and uploaded transcript for {entry['key']}")
+                                    else:
+                                        print(f"Batch result for {entry['t_key']} failed: {result.get('error')}")
+                                finally:
+                                    try:
+                                        r.delete(entry["lock_key"])
+                                    except Exception:
+                                        pass
+
+                            # Collect downloads that completed while the GPU was busy
+                            while not download_queue.empty():
+                                try:
+                                    item_index, entry = download_queue.get_nowait()
+                                    record_entry(item_index, entry)
+                                except queue.Empty:
+                                    break
 
                         # Release locks for entries that failed download
                         for entry in downloaded_entries:
                             if not entry:
                                 continue
                             if "download_error" in entry:
-                                # Surface download failures so we can monitor S3-level issues
                                 print(f"Download error for {entry['key']}: {entry['download_error']}")
                                 try:
                                     r.delete(entry["lock_key"])
                                 except Exception:
                                     pass
+
+                        print(f"Completed {batch_num} GPU batch(es) from prefetch window")
                     except Exception as e:
                         print(f"Batch processing error: {e}")
                         traceback.print_exc()
@@ -423,7 +463,7 @@ def transcribe_file(model: WhisperModel, audio_path: Path) -> Dict[str, Any]:
         language="sv",
         task="transcribe",
         vad_filter=True,
-        beam_size=2,
+        beam_size=0,
         temperature=0.0,
         condition_on_previous_text=False,
     )

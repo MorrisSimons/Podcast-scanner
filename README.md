@@ -58,6 +58,8 @@ Download all the mp3s.
 #### Step 7
 Transcribe all the mp3s.
 
+**Configuration:** The transcription worker keeps a 2× prefetch buffer by default via `PREFETCH_MULTIPLIER`. This overlaps S3 downloads with GPU transcription so the accelerator stays saturated. Set `PREFETCH_MULTIPLIER=1` if you want to disable the prefetch window.
+
 #### Step 8
 Build a search function
 
@@ -128,7 +130,7 @@ Total unique status_code: 6
 Null/Missing status_code: 0
 ```
 
-Conslusion; Minor dataloss we dont cate to fix it now
+Conclusion: Minor data loss; we don't care to fix it now
 
 ```
 RSS_request_status_code Distribution:
@@ -212,10 +214,30 @@ My first solution was to run it from my PC but the speed wasn't cutting it. I wa
 
 Anyway using Triform I got it down from ~100 hours to ~30 hours and went from 3000 podcasts per hour to about 9000 per hour.
 
-Okay, here’s how I did it: Dump everything in S3, but group by podcast_id. Each podcast gets its own “folder” (yeah, S3 doesn’t actually have folders, but whatever—it looks nice in the UI). Sticking files in these pseudo-folders doesn’t hurt performance and makes life easier when you want to shove metadata or transcripts next to the mp3s. Pro dev tip: just treat the folder structure as a namespace for sanity.
+Dump everything in S3, but group by podcast_id. Each podcast gets its own “folder” (yeah, S3 doesn’t actually have folders, but whatever—it looks nice in the UI). Sticking files in these pseudo-folders doesn’t hurt performance and makes life easier when you want to shove metadata or transcripts next to the mp3s. tip: just treat the folder structure as a namespace for sanity.
+
+
+#### Transcribing part.
+Okay so here is how i did, I wanted to start with high quality, using beam 8 on KB-Whisper-large. Then do all the speedups i can get without lowering the quality. 
+- I choose an Faster **from faster_whisper import WhisperModel**. It is the fastest of all the option in the KB-whispermodels in terms of infrance.
+- Since im using a smaller model and they can be runned on just 1 H200 GPU, Why do this; from what i understood is that doing this will leed to less overhead in terms of communications and splitting works amoung multiple GPUs. I did this by adding a redis queue.
+- The next speedup thing i did was to do the download first and then have a thread downloading more files while transcribing at the sametime. This way we could make sure we have a higher GPU utilization.
+- 
 
 
 DO SOME comments here
+
+
+def build_model(cache_dir: Optional[str] = "cache") -> WhisperModel:
+    compute_type = os.getenv("COMPUTE_TYPE", "float16")
+    device_index = int(os.getenv("CUDA_DEVICE_INDEX", "0"))
+    return WhisperModel(
+        "KBLab/kb-whisper-medium",
+        device="cuda",
+        device_index=device_index,
+        compute_type=compute_type,
+        download_root="cache",
+    )
 
 ```
 
@@ -224,8 +246,12 @@ DO SOME comments here
         language="sv",
         task="transcribe",
         vad_filter=True,
-        beam_size=8,
+        beam_size=0 , 
         temperature=0.0,
         condition_on_previous_text=False,
 
 ```
+
+Redis my thinking behind that.
+
+also discovery of that you cant do an async download you need
