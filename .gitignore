@@ -15,3 +15,5 @@ redis-queue-setup.md
 cache/
 deploy-test.sh
 performance-gains-log
+deploy-gpu-monitoring.sh
+superset/

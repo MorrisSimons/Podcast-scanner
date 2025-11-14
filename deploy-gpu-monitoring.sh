@@ -14,13 +14,10 @@ helm repo update
 
 helm upgrade --install "$RELEASE_NAME" gpu-helm-charts/"$CHART_NAME" \
   -n "$NAMESPACE" \
+  --reset-values \
   -f "$VALUES_FILE"
 
 kubectl apply -f "$DIR/k8s/monitoring/prometheus/servicemonitor-dcgm.yaml"
-kubectl apply -f "$DIR/k8s/monitoring/vgpu-monitor/serviceaccount.yaml"
-kubectl apply -f "$DIR/k8s/monitoring/vgpu-monitor/daemonset.yaml"
-kubectl apply -f "$DIR/k8s/monitoring/vgpu-monitor/service.yaml"
-kubectl apply -f "$DIR/k8s/monitoring/vgpu-monitor/servicemonitor.yaml"
 kubectl apply -f "$DIR/k8s/monitoring/prometheus/prometheusrule-gpu.yaml"
 
 kubectl get pods -n "$NAMESPACE"

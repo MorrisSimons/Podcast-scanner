@@ -255,10 +255,16 @@ Segments
         language="sv",
         task="transcribe",
         vad_filter=True,
-        beam_size=0 , 
+        beam_size=1 , 
         temperature=0.0,
         condition_on_previous_text=False,
 
 ```
 
-11-12
+
+### Search function
+
+When we got the transcriber pipeline done we wanted to make a platform so we can search for these podcasts. Initially i wanted to build my own search enginen to find keywords in the podcasts files. I will probably do this anyway.
+
+
+### 
