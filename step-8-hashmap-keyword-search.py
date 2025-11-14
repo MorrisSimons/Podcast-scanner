@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Union
 
 TOKEN_PATTERN = re.compile(r"\b\w+\b")
 
@@ -76,7 +77,7 @@ def hash_word(word: str) -> str:
 def build_indices(
     word_data: dict[str, dict[str, object]],
     file_index: dict[str, list[str]],
-) -> dict[str, dict[str, object] | dict[str, list[str]]]:
+) -> dict[str, Union[dict[str, object], dict[str, list[str]]]]:
     word_index: dict[str, dict[str, object]] = {}
     for word in sorted(word_data):
         entry = word_data[word]
@@ -91,7 +92,7 @@ def build_indices(
     }
 
 
-def write_hash_map(hash_map: dict[str, dict[str, object] | dict[str, list[str]]], output_path: Path) -> None:
+def write_hash_map(hash_map: dict[str, Union[dict[str, object], dict[str, list[str]]]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(hash_map, indent=2), encoding="utf-8")
 
