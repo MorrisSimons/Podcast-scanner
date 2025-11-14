@@ -15,7 +15,7 @@ import boto3
 from botocore.exceptions import ClientError
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.query import SimpleStatement, BatchStatement, ConsistencyLevel
+from cassandra.query import SimpleStatement
 from dotenv import load_dotenv
 from tqdm import tqdm
 
@@ -171,8 +171,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=50,
-        help="Number of files to batch together for Cassandra inserts (default: 50).",
+        default=10,
+        help="Number of files to batch together for Cassandra inserts (default: 10).",
     )
     return parser.parse_args()
 
@@ -218,11 +218,11 @@ def main() -> None:
     # Prepare statements
     insert_query = """
     INSERT INTO transcript_files (filename, content, file_size, s3_key, downloaded_at)
-    VALUES (%s, %s, %s, %s, %s)
+    VALUES (?, ?, ?, ?, ?)
     """
     prepared = session.prepare(insert_query)
     
-    check_query = "SELECT filename FROM transcript_files WHERE filename = %s"
+    check_query = "SELECT filename FROM transcript_files WHERE filename = ?"
     check_prepared = session.prepare(check_query)
     
     # List .txt files (stop early if limit is specified)
@@ -249,7 +249,7 @@ def main() -> None:
             pass
         return None
     
-    # Check in parallel batches
+    # Check in parallel batches 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         results = list(tqdm(
             executor.map(check_exists, txt_files),
@@ -285,8 +285,9 @@ def main() -> None:
         batch_success = 0
         batch_errors = 0
         
-        # Create S3 client for this thread
+        # Create S3 client and Cassandra session for this thread
         thread_s3 = create_s3_client()
+        thread_session = cluster.connect(cassandra_keyspace)
         
         # Download all files in batch
         file_data_list = []
@@ -300,19 +301,31 @@ def main() -> None:
         if not file_data_list:
             return batch_success, batch_errors
         
-        # Batch insert into Cassandra
-        batch = BatchStatement(consistency_level=ConsistencyLevel.QUORUM)
-        for data in file_data_list:
-            batch.add(prepared, (
-                data["filename"],
-                data["content"],
-                data["file_size"],
-                data["s3_key"],
-                data["downloaded_at"]
-            ))
-        
-        session.execute(batch)
-        batch_success = len(file_data_list)
+        # Insert into Cassandra using async writes for higher throughput without batching
+        futures = []
+        try:
+            for data in file_data_list:
+                future = thread_session.execute_async(
+                    prepared,
+                    (
+                        data["filename"],
+                        data["content"],
+                        data["file_size"],
+                        data["s3_key"],
+                        data["downloaded_at"],
+                    ),
+                )
+                futures.append((future, data["s3_key"]))
+
+            for future, key in futures:
+                try:
+                    future.result()
+                    batch_success += 1
+                except Exception as e:
+                    print(f"ERROR inserting {key}: {e}")
+                    batch_errors += 1
+        finally:
+            thread_session.shutdown()
         
         return batch_success, batch_errors
     
