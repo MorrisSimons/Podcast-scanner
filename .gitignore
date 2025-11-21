@@ -17,3 +17,4 @@ deploy-test.sh
 performance-gains-log
 deploy-gpu-monitoring.sh
 superset/
+step-8-space_complexity_output

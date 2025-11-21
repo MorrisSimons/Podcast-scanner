@@ -1,0 +1,51 @@
+Memory and Output Size Analysis - step-8-build-cassandra-indices.py
+====================================================================
+
+This experiment measures how memory usage (RSS) and output file size grow
+as the number of processed files increases.
+
+RESULTS IN MEGABYTES:
+---------------------
+
+Files    Max Memory (MB)    Output Size (MB)    Memory per File    Output per File
+         (RSS)              (JSON file)         (MB)               (MB)
+-----    ----------------   -----------------   ----------------   ----------------
+50       119.3             10.3                2.39               0.21
+100      157.4             16.9                1.57               0.17
+250      357.8             40.7                1.43               0.16
+500      607.2             79.5                1.21               0.16
+750      835.0             116.0               1.11               0.15
+1000     1076.5            152.4               1.08               0.15
+1500     1409.0            219.5               0.94               0.15
+2000     1924.8            291.4               0.96               0.15
+2500     2031.7            361.4               0.81               0.14
+3000     2765.0            433.2               0.92               0.14
+
+KEY FINDINGS:
+-------------
+
+1. MEMORY GROWTH PATTERN:
+   - Memory usage grows roughly linearly with the number of files
+   - From ~119 MB (50 files) to ~2.8 GB (3000 files)
+   - Memory per file starts high (~2.4 MB/file) but stabilizes around 0.9-1.0 MB/file
+
+2. OUTPUT FILE GROWTH:
+   - Output JSON file size grows linearly with files processed
+   - From ~10 MB (50 files) to ~433 MB (3000 files)
+   - Output per file is very consistent: ~0.14-0.15 MB per file
+   - This suggests the data structure scales efficiently
+
+3. SCALING BEHAVIOR:
+   - Memory per file decreases as more files are processed (more shared words)
+   - At 3000 files: ~0.92 MB memory per file, ~0.14 MB output per file
+   - Memory-to-output ratio: ~6.4x (memory usage is ~6.4x larger than output file)
+
+4. EFFICIENCY:
+   - The consistent output-per-file ratio indicates efficient indexing
+   - Word overlap between files helps reduce memory growth per additional file
+
+CONVERSION NOTES:
+-----------------
+- Max RSS: kilobytes ÷ 1024 = megabytes
+- Output size: bytes ÷ (1024 × 1024) = megabytes
+

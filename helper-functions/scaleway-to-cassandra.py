@@ -56,7 +56,11 @@ def connect_cassandra(
 ) -> Tuple[Cluster, Any]:
     """Connect to Cassandra cluster and return session."""
     auth = PlainTextAuthProvider(username, password)
-    cluster = Cluster([host], auth_provider=auth)
+    cluster = Cluster(
+        [host],
+        auth_provider=auth,
+        protocol_version=5,   # <— add this line
+    )
     session = cluster.connect(keyspace)
     return cluster, session
 
