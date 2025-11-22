@@ -24,8 +24,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--host",
-        default=os.getenv("ELASTICSEARCH_ENDPOINT"),
-        help="Elasticsearch host URL.",
+        default="http://100.116.226.118:9200",
+        help="Elasticsearch host URL. Defaults to local instance: http://100.116.226.118:9200 (or set ELASTICSEARCH_ENDPOINT env var to override).",
     )
     parser.add_argument(
         "--api-key",
@@ -46,9 +46,59 @@ def parse_args() -> argparse.Namespace:
 
 
 def connect(host: str, api_key: Optional[str]) -> Elasticsearch:
-    client = Elasticsearch(hosts=[host], api_key=api_key) if api_key else Elasticsearch(hosts=[host])
-    if not client.ping():
-        raise ConnectionError(f"Failed to reach Elasticsearch at {host}")
+    import elasticsearch
+    
+    # Check if client version matches server version
+    client_version = elasticsearch.__version__
+    if client_version[0] == 9:
+        # Version 9 client requires Elasticsearch 9 server
+        # For Elasticsearch 8, we need elasticsearch-py 8.x
+        raise ValueError(
+            f"Version mismatch: elasticsearch-py {client_version[0]}.x is installed, "
+            f"but Elasticsearch 8.x requires elasticsearch-py 8.x. "
+            f"Please install compatible version: pip install 'elasticsearch>=8.0.0,<9.0.0'"
+        )
+    
+    # Determine if this is an HTTP (local) or HTTPS (cloud) connection
+    is_local = host.startswith("http://")
+    
+    # Base configuration for all connections
+    es_config = {
+        "hosts": [host],
+    }
+    
+    if is_local:
+        # Local Elasticsearch instance without security
+        # SSL is automatically disabled for HTTP URLs
+        # Don't verify certificates for local instances
+        es_config.update({
+            "verify_certs": False,
+            "ssl_show_warn": False,
+        })
+    else:
+        # Cloud/managed Elasticsearch instance (HTTPS)
+        # SSL is automatically enabled for HTTPS URLs
+        es_config.update({
+            "verify_certs": True,
+        })
+        if api_key:
+            es_config["api_key"] = api_key
+    
+    client = Elasticsearch(**es_config)
+    
+    try:
+        if not client.ping():
+            raise ConnectionError(f"Failed to reach Elasticsearch at {host}. Is Elasticsearch running?")
+    except Exception as e:
+        error_msg = str(e)
+        # Check for version mismatch error
+        if "compatible-with=9" in error_msg and "version 8 or 7" in error_msg:
+            raise ValueError(
+                "Version mismatch: elasticsearch-py 9.x is incompatible with Elasticsearch 8.x. "
+                "Please install elasticsearch-py 8.x: pip install 'elasticsearch>=8.0.0,<9.0.0'"
+            ) from e
+        raise ConnectionError(f"Failed to connect to Elasticsearch at {host}: {e}") from e
+    
     return client
 
 

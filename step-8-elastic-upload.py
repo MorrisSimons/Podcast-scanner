@@ -8,8 +8,10 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import boto3
 import requests
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.query import SimpleStatement
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,28 +37,21 @@ class SupabaseRestClient:
         return self.session.get(url, params=params or {}, headers=self.default_headers)
 
 
-def make_s3_client():
-    endpoint_url = os.getenv("S3_ENDPOINT_URL")
-    bucket = os.getenv("S3_BUCKET")
-    
-    if not endpoint_url or not bucket:
-        raise ValueError("S3_ENDPOINT_URL and S3_BUCKET are required")
-    
-    if bucket and f"{bucket}." in endpoint_url:
-        endpoint_url = endpoint_url.replace(f"{bucket}.", "")
-    
-    config = boto3.session.Config(s3={'addressing_style': 'path'})
-    
-    s3 = boto3.session.Session().client(
-        service_name="s3",
-        region_name=os.getenv("S3_REGION"),
-        endpoint_url=endpoint_url,
-        aws_access_key_id=os.getenv("S3_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY"),
-        config=config,
+def connect_cassandra(
+    host: str,
+    username: str,
+    password: str,
+    keyspace: str
+):
+    """Connect to Cassandra cluster and return cluster and session."""
+    auth = PlainTextAuthProvider(username, password)
+    cluster = Cluster(
+        [host],
+        auth_provider=auth,
+        protocol_version=5,
     )
-    
-    return s3, bucket
+    session = cluster.connect(keyspace)
+    return cluster, session
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,9 +64,9 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing .txt files to index.",
     )
     parser.add_argument(
-        "--use-s3",
+        "--use-cassandra",
         action="store_true",
-        help="Read transcript files from Scaleway S3 instead of local directory.",
+        help="Read transcript files from Cassandra instead of local directory.",
     )
     parser.add_argument(
         "--limit",
@@ -90,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--host",
-        default=os.getenv("ELASTICSEARCH_ENDPOINT"),
-        help="Elasticsearch host URL.",
+        default="http://100.116.226.118:9200",
+        help="Elasticsearch host URL. Defaults to local instance: http://100.116.226.118:9200 (or set ELASTICSEARCH_ENDPOINT env var to override).",
     )
     parser.add_argument(
         "--api-key",
@@ -137,9 +132,25 @@ def _unique_tokens(text: str) -> set[str]:
     return {match for match in TOKEN_PATTERN.findall(text.lower())}
 
 
-def collect_documents_from_s3(encoding: str, limit: Optional[int] = None) -> list[dict[str, object]]:
-    s3, bucket = make_s3_client()
+def collect_documents_from_cassandra(encoding: str, limit: Optional[int] = None) -> list[dict[str, object]]:
+    # Cassandra configuration
+    cassandra_host = os.getenv("CASSANDRA_HOST")
+    cassandra_username = os.getenv("CASSANDRA_USERNAME")
+    cassandra_password = os.getenv("CASSANDRA_PASSWORD")
+    cassandra_keyspace = os.getenv("CASSANDRA_KEYSPACE")
     
+    missing = [
+        var for var, value in [
+            ("CASSANDRA_HOST", cassandra_host),
+            ("CASSANDRA_USERNAME", cassandra_username),
+            ("CASSANDRA_PASSWORD", cassandra_password),
+            ("CASSANDRA_KEYSPACE", cassandra_keyspace),
+        ] if not value
+    ]
+    if missing:
+        raise ValueError(f"Missing required Cassandra environment variables: {', '.join(missing)}")
+    
+    # Supabase configuration
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not supabase_url or not supabase_key:
@@ -147,105 +158,173 @@ def collect_documents_from_s3(encoding: str, limit: Optional[int] = None) -> lis
     
     supabase_client = SupabaseRestClient(supabase_url, supabase_key)
     
-    s3_prefix = os.getenv("S3_PREFIX", "")
-    if s3_prefix == "":
-        s3_prefix = None
-    
-    paginator = s3.get_paginator("list_objects_v2")
-    params = {"Bucket": bucket}
-    if s3_prefix:
-        params["Prefix"] = s3_prefix
+    # Connect to Cassandra
+    print(f"Connecting to Cassandra at {cassandra_host}...")
+    cluster, session = connect_cassandra(
+        cassandra_host,
+        cassandra_username,
+        cassandra_password,
+        cassandra_keyspace
+    )
     
     documents: list[dict[str, object]] = []
     
-    print("Listing .txt files from S3...")
-    txt_keys = []
-    for page in paginator.paginate(**params):
-        for obj in page.get("Contents", []):
-            key = obj.get("Key")
-            if key and key.lower().endswith(".txt"):
-                txt_keys.append(key)
-    
-    print(f"Found {len(txt_keys)} .txt files in S3")
-    
-    if limit:
-        txt_keys = txt_keys[:limit]
-        print(f"Limiting to first {len(txt_keys)} files for testing")
-    
-    for idx, key in enumerate(txt_keys, 1):
-        filename = key.split("/")[-1]
-        episode_id = filename.rsplit(".", 1)[0]
+    try:
+        # Fetch all filenames first (lightweight query)
+        print("Fetching all filenames from transcript_files table...")
+        filename_query = SimpleStatement("SELECT filename FROM transcript_files", fetch_size=1000)
+        filename_result = session.execute(filename_query)
         
-        print(f"[{idx}/{len(txt_keys)}] Processing episode {episode_id}...")
+        all_filenames = [row.filename for row in filename_result]
+        if not all_filenames:
+            raise ValueError("No records found in transcript_files table")
         
-        response = s3.get_object(Bucket=bucket, Key=key)
-        text = response["Body"].read().decode(encoding)
+        # Limit files if specified (for testing)
+        if limit:
+            all_filenames = all_filenames[:limit]
+            print(f"Limiting to first {limit} files for testing...")
         
-        unique_keywords = sorted(_unique_tokens(text))
-        if not unique_keywords:
-            print(f"  Skipping {episode_id} - no keywords found")
-            continue
+        print(f"Found {len(all_filenames)} files. Processing...")
         
-        resp = supabase_client.get(
-            "/episodes",
-            params={
-                "id": f"eq.{episode_id}",
-                "select": "id,title,description,pub_date,duration_seconds,episode_number,season_number,audio_url,link_url,keywords,podcasts(id,title,author,categories,image_url,language,rss_feed_url)"
-            }
-        )
+        # Prepare query to fetch content
+        prepared_query = session.prepare("SELECT filename, content FROM transcript_files WHERE filename = ?")
         
-        if resp.status_code != 200:
-            print(f"  Warning: Failed to fetch metadata for {episode_id}: HTTP {resp.status_code}")
-            continue
+        for idx, filename in enumerate(all_filenames, 1):
+            episode_id = filename.rsplit(".", 1)[0] if filename.endswith(".txt") else filename
+            
+            print(f"[{idx}/{len(all_filenames)}] Processing episode {episode_id}...")
+            
+            try:
+                result = session.execute(prepared_query, (filename,))
+                row = result.one()
+                
+                if not row or not row.content:
+                    print(f"  Skipping {episode_id} - no content found")
+                    continue
+                
+                text = row.content
+                unique_keywords = sorted(_unique_tokens(text))
+                if not unique_keywords:
+                    print(f"  Skipping {episode_id} - no keywords found")
+                    continue
+                
+                # Fetch metadata from Supabase
+                resp = supabase_client.get(
+                    "/episodes",
+                    params={
+                        "id": f"eq.{episode_id}",
+                        "select": "id,title,description,pub_date,duration_seconds,episode_number,season_number,audio_url,link_url,keywords,podcasts(id,title,author,categories,image_url,language,rss_feed_url)"
+                    }
+                )
+                
+                if resp.status_code != 200:
+                    print(f"  Warning: Failed to fetch metadata for {episode_id}: HTTP {resp.status_code}")
+                    continue
+                
+                rows = resp.json()
+                if not rows:
+                    print(f"  Warning: No metadata found for {episode_id}")
+                    continue
+                
+                episode_data = rows[0]
+                podcast_data = episode_data.pop("podcasts", None)
+                
+                doc = {
+                    "id": episode_id,
+                    "content": text,
+                    "unique_keywords": unique_keywords,
+                    "episode_id": episode_data.get("id"),
+                    "episode_title": episode_data.get("title"),
+                    "episode_description": episode_data.get("description"),
+                    "episode_pub_date": episode_data.get("pub_date"),
+                    "episode_duration_seconds": episode_data.get("duration_seconds"),
+                    "episode_number": episode_data.get("episode_number"),
+                    "episode_season_number": episode_data.get("season_number"),
+                    "episode_audio_url": episode_data.get("audio_url"),
+                    "episode_link_url": episode_data.get("link_url"),
+                    "episode_keywords": episode_data.get("keywords") or [],
+                }
+                
+                if podcast_data:
+                    doc.update({
+                        "podcast_id": podcast_data.get("id"),
+                        "podcast_title": podcast_data.get("title"),
+                        "podcast_author": podcast_data.get("author"),
+                        "podcast_categories": podcast_data.get("categories") or [],
+                        "podcast_image_url": podcast_data.get("image_url"),
+                        "podcast_language": podcast_data.get("language"),
+                        "podcast_rss_feed_url": podcast_data.get("rss_feed_url"),
+                    })
+                
+                documents.append(doc)
+            except Exception as e:
+                print(f"  WARNING: Error processing {episode_id}: {e}")
+                continue
         
-        rows = resp.json()
-        if not rows:
-            print(f"  Warning: No metadata found for {episode_id}")
-            continue
-        
-        episode_data = rows[0]
-        podcast_data = episode_data.pop("podcasts", None)
-        
-        doc = {
-            "id": episode_id,
-            "content": text,
-            "unique_keywords": unique_keywords,
-            "episode_id": episode_data.get("id"),
-            "episode_title": episode_data.get("title"),
-            "episode_description": episode_data.get("description"),
-            "episode_pub_date": episode_data.get("pub_date"),
-            "episode_duration_seconds": episode_data.get("duration_seconds"),
-            "episode_number": episode_data.get("episode_number"),
-            "episode_season_number": episode_data.get("season_number"),
-            "episode_audio_url": episode_data.get("audio_url"),
-            "episode_link_url": episode_data.get("link_url"),
-            "episode_keywords": episode_data.get("keywords") or [],
-        }
-        
-        if podcast_data:
-            doc.update({
-                "podcast_id": podcast_data.get("id"),
-                "podcast_title": podcast_data.get("title"),
-                "podcast_author": podcast_data.get("author"),
-                "podcast_categories": podcast_data.get("categories") or [],
-                "podcast_image_url": podcast_data.get("image_url"),
-                "podcast_language": podcast_data.get("language"),
-                "podcast_rss_feed_url": podcast_data.get("rss_feed_url"),
-            })
-        
-        documents.append(doc)
+    finally:
+        cluster.shutdown()
     
     if not documents:
-        raise ValueError("No indexable documents collected from S3")
+        raise ValueError("No indexable documents collected from Cassandra")
     
     print(f"Collected {len(documents)} documents with metadata")
     return documents
 
 
 def connect(host: str, api_key: Optional[str]) -> Elasticsearch:
-    client = Elasticsearch(hosts=[host], api_key=api_key) if api_key else Elasticsearch(hosts=[host])
-    if not client.ping():
-        raise ConnectionError(f"Failed to reach Elasticsearch at {host}")
+    import elasticsearch
+    
+    # Check if client version matches server version
+    client_version = elasticsearch.__version__
+    if client_version[0] == 9:
+        # Version 9 client requires Elasticsearch 9 server
+        # For Elasticsearch 8, we need elasticsearch-py 8.x
+        raise ValueError(
+            f"Version mismatch: elasticsearch-py {client_version[0]}.x is installed, "
+            f"but Elasticsearch 8.x requires elasticsearch-py 8.x. "
+            f"Please install compatible version: pip install 'elasticsearch>=8.0.0,<9.0.0'"
+        )
+    
+    # Determine if this is an HTTP (local) or HTTPS (cloud) connection
+    is_local = host.startswith("http://")
+    
+    # Base configuration for all connections
+    es_config = {
+        "hosts": [host],
+    }
+    
+    if is_local:
+        # Local Elasticsearch instance without security
+        # SSL is automatically disabled for HTTP URLs
+        # Don't verify certificates for local instances
+        es_config.update({
+            "verify_certs": False,
+            "ssl_show_warn": False,
+        })
+    else:
+        # Cloud/managed Elasticsearch instance (HTTPS)
+        # SSL is automatically enabled for HTTPS URLs
+        es_config.update({
+            "verify_certs": True,
+        })
+        if api_key:
+            es_config["api_key"] = api_key
+    
+    client = Elasticsearch(**es_config)
+    
+    try:
+        if not client.ping():
+            raise ConnectionError(f"Failed to reach Elasticsearch at {host}. Is Elasticsearch running?")
+    except Exception as e:
+        error_msg = str(e)
+        # Check for version mismatch error
+        if "compatible-with=9" in error_msg and "version 8 or 7" in error_msg:
+            raise ValueError(
+                "Version mismatch: elasticsearch-py 9.x is incompatible with Elasticsearch 8.x. "
+                "Please install elasticsearch-py 8.x: pip install 'elasticsearch>=8.0.0,<9.0.0'"
+            ) from e
+        raise ConnectionError(f"Failed to connect to Elasticsearch at {host}: {e}") from e
+    
     return client
 
 
@@ -303,13 +382,8 @@ def bulk_index(
 def main() -> None:
     args = parse_args()
 
-    if not args.host:
-        raise ValueError(
-            "Elasticsearch host is required. Set ELASTICSEARCH_ENDPOINT or pass --host."
-        )
-
-    if args.use_s3:
-        documents = collect_documents_from_s3(args.encoding, args.limit)
+    if args.use_cassandra:
+        documents = collect_documents_from_cassandra(args.encoding, args.limit)
     else:
         input_dir = Path(args.input_dir).expanduser().resolve()
         if not input_dir.exists() or not input_dir.is_dir():
