@@ -13,6 +13,7 @@ from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.query import SimpleStatement
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -80,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--index",
-        default=os.getenv("ELASTICSEARCH_INDEX", "podcast-transcripts"),
+        default=os.getenv("ELASTICSEARCH_INDEX") or "podcast-transcripts",
         help="Elasticsearch index name to write to.",
     )
     parser.add_argument(
@@ -186,47 +187,70 @@ def collect_documents_from_cassandra(encoding: str, limit: Optional[int] = None)
         
         print(f"Found {len(all_filenames)} files. Processing...")
         
+        # * Extract all episode IDs first
+        episode_ids = []
+        filename_to_episode_id = {}
+        for filename in all_filenames:
+            episode_id = filename.rsplit(".", 1)[0] if filename.endswith(".txt") else filename
+            episode_ids.append(episode_id)
+            filename_to_episode_id[filename] = episode_id
+        
+        # * Batch fetch all metadata from Supabase (much faster than individual requests)
+        print("Fetching metadata from Supabase in batches...")
+        metadata_lookup = {}
+        batch_size = 100
+        
+        for i in tqdm(range(0, len(episode_ids), batch_size), desc="Fetching metadata", unit="batch"):
+            batch_ids = episode_ids[i:i + batch_size]
+            # * PostgREST format: id=in.(value1,value2,value3)
+            ids_param = ",".join(batch_ids)
+            
+            try:
+                resp = supabase_client.get(
+                    "/episodes",
+                    params={
+                        "id": f"in.({ids_param})",
+                        "select": "id,title,description,pub_date,duration_seconds,episode_number,season_number,audio_url,link_url,keywords,podcasts(id,title,author,categories,image_url,language,rss_feed_url)"
+                    }
+                )
+                
+                if resp.status_code == 200:
+                    rows = resp.json()
+                    for episode_data in rows:
+                        episode_id = episode_data.get("id")
+                        if episode_id:
+                            metadata_lookup[episode_id] = episode_data
+            except Exception as e:
+                tqdm.write(f"WARNING: Error fetching metadata batch {i//batch_size + 1}: {e}")
+                continue
+        
+        print(f"Fetched metadata for {len(metadata_lookup)} episodes")
+        
         # Prepare query to fetch content
         prepared_query = session.prepare("SELECT filename, content FROM transcript_files WHERE filename = ?")
         
-        for idx, filename in enumerate(all_filenames, 1):
-            episode_id = filename.rsplit(".", 1)[0] if filename.endswith(".txt") else filename
-            
-            print(f"[{idx}/{len(all_filenames)}] Processing episode {episode_id}...")
+        for filename in tqdm(all_filenames, desc="Processing episodes", unit="episode"):
+            episode_id = filename_to_episode_id[filename]
             
             try:
                 result = session.execute(prepared_query, (filename,))
                 row = result.one()
                 
                 if not row or not row.content:
-                    print(f"  Skipping {episode_id} - no content found")
                     continue
                 
                 text = row.content
                 unique_keywords = sorted(_unique_tokens(text))
                 if not unique_keywords:
-                    print(f"  Skipping {episode_id} - no keywords found")
                     continue
                 
-                # Fetch metadata from Supabase
-                resp = supabase_client.get(
-                    "/episodes",
-                    params={
-                        "id": f"eq.{episode_id}",
-                        "select": "id,title,description,pub_date,duration_seconds,episode_number,season_number,audio_url,link_url,keywords,podcasts(id,title,author,categories,image_url,language,rss_feed_url)"
-                    }
-                )
-                
-                if resp.status_code != 200:
-                    print(f"  Warning: Failed to fetch metadata for {episode_id}: HTTP {resp.status_code}")
+                # Get metadata from lookup (already fetched in batches)
+                episode_data = metadata_lookup.get(episode_id)
+                if not episode_data:
                     continue
                 
-                rows = resp.json()
-                if not rows:
-                    print(f"  Warning: No metadata found for {episode_id}")
-                    continue
-                
-                episode_data = rows[0]
+                # Create a copy to avoid modifying the original
+                episode_data = episode_data.copy()
                 podcast_data = episode_data.pop("podcasts", None)
                 
                 doc = {
@@ -258,7 +282,7 @@ def collect_documents_from_cassandra(encoding: str, limit: Optional[int] = None)
                 
                 documents.append(doc)
             except Exception as e:
-                print(f"  WARNING: Error processing {episode_id}: {e}")
+                tqdm.write(f"WARNING: Error processing {episode_id}: {e}")
                 continue
         
     finally:
@@ -329,6 +353,10 @@ def connect(host: str, api_key: Optional[str]) -> Elasticsearch:
 
 
 def ensure_index(client: Elasticsearch, index_name: str, delete_existing: bool) -> None:
+    # * Validate index name
+    if not index_name or not index_name.strip():
+        raise ValueError("Elasticsearch index name cannot be empty. Set ELASTICSEARCH_INDEX env var or use --index argument.")
+    
     if delete_existing and client.indices.exists(index=index_name):
         client.indices.delete(index=index_name)
 

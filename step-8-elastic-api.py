@@ -319,6 +319,7 @@ def get_episode(
     Get full details of a specific episode by ID.
     """
     try:
+        es_client = get_elasticsearch_client()
         response = es_client.get(index=index, id=episode_id)
         return response["_source"]
     except Exception as e:
